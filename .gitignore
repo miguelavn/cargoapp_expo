@@ -1,0 +1,52 @@
+# Root .gitignore for this repo
+# The Expo app lives under cargoapp_expo/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.orig.*
+
+# Logs
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+pnpm-debug.log*
+
+# Env files (keep secrets out of git)
+.env
+.env.*
+.env*.local
+
+# Test/coverage
+coverage/
+.nyc_output/
+
+# Node / Expo outputs under the subfolder
+cargoapp_expo/node_modules/
+cargoapp_expo/.expo/
+cargoapp_expo/dist/
+cargoapp_expo/web-build/
+cargoapp_expo/.metro-health-check*
+
+# TypeScript build info
+cargoapp_expo/*.tsbuildinfo
+
+# Expo generated types
+cargoapp_expo/expo-env.d.ts
+
+# Optional native folders if prebuild/eject is used later
+cargoapp_expo/android/
+cargoapp_expo/ios/
+
+# Certificates/keys
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Kotlin cache
+cargoapp_expo/.kotlin/
