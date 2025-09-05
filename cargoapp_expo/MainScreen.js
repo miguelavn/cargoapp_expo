@@ -14,6 +14,12 @@ const MainScreen = ({ navigation }) => {
   const [displayName, setDisplayName] = useState("");
   const [roleName, setRoleName] = useState("");
   const setGlobalPermissions = useContext(PermissionsContext)[1] || (()=>{});
+  const getGreeting = () => {
+    const h = new Date().getHours();
+    if (h < 12) return 'Buenos días';
+    if (h < 18) return 'Buenas tardes';
+    return 'Buenas noches';
+  };
 
   useEffect(() => {
     const fetchUserPermissions = async () => {
@@ -86,13 +92,13 @@ const MainScreen = ({ navigation }) => {
       <View style={styles.container}>
         <View style={styles.content}>
           {/* Encabezado tipo Rappi con usuario y rol */}
-          <View style={styles.userHeader}>
+      <View style={styles.userHeader}>
             <View style={styles.avatarMock}>
               <MaterialIcons name="person" size={20} color="#333" />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.userNameText}>{displayName || 'Usuario'}</Text>
-              <Text style={styles.userRoleText}>{roleName ? `Rol: ${roleName}` : ''}</Text>
+        <Text style={styles.userNameText}>{getGreeting()}, {displayName || 'Usuario'}</Text>
+        <Text style={styles.userRoleText}>{roleName ? roleName : ''}</Text>
             </View>
           </View>
 
@@ -186,7 +192,7 @@ const styles = StyleSheet.create({
   },
   userNameText: { fontSize: 16, fontWeight: '700', color: '#333' },
   userRoleText: { fontSize: 12, color: '#666' },
-  bigQuestion: { fontSize: 20, fontWeight: '700', color: '#333', marginTop: 8 },
+  bigQuestion: { fontSize: 22, fontWeight: '800', color: '#333', marginTop: 8 },
   noPermText: {
     color: '#333',
     fontSize: 15,

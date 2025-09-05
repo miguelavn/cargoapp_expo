@@ -23,9 +23,11 @@ function TabNavigator() {
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarShowLabel: false,
+        tabBarShowLabel: true,
         tabBarActiveTintColor: '#6C63FF',
         tabBarInactiveTintColor: '#666',
+        tabBarActiveBackgroundColor: '#FFF4CC',
+        tabBarLabelStyle: { fontSize: 11, marginTop: -2 },
         tabBarStyle: {
           position: 'absolute',
           left: 16,
