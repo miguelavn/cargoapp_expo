@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { supabase } from './supabaseClient';
 import { MaterialIcons } from '@expo/vector-icons';
 
@@ -11,6 +11,8 @@ const MainScreen = ({ navigation }) => {
   const [permissions, setPermissions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [roleName, setRoleName] = useState("");
   const setGlobalPermissions = useContext(PermissionsContext)[1] || (()=>{});
 
   useEffect(() => {
@@ -24,10 +26,11 @@ const MainScreen = ({ navigation }) => {
         // 2. Buscar en app_users por auth_id
         const { data: appUser, error: appUserError } = await supabase
           .from('app_users')
-          .select('user_id')
+          .select('user_id, name, last_name')
           .eq('auth_id', user.id)
           .single();
         if (appUserError || !appUser) throw new Error("No se encontró el usuario en app_users");
+        setDisplayName(appUser.name ? `${appUser.name} ${appUser.last_name ?? ''}`.trim() : (user.email || 'Usuario'));
 
         // 3. Buscar el rol del usuario
         const { data: userRole, error: userRoleError } = await supabase
@@ -36,6 +39,14 @@ const MainScreen = ({ navigation }) => {
           .eq('user_id', appUser.user_id)
           .single();
         if (userRoleError || !userRole) throw new Error("No se encontró el rol del usuario");
+
+        // 3.1 Obtener nombre del rol
+        const { data: roleData, error: roleErr } = await supabase
+          .from('roles')
+          .select('role_name')
+          .eq('id', userRole.role_id)
+          .single();
+        if (!roleErr && roleData) setRoleName(roleData.role_name);
 
         // 4. Buscar los permisos asociados a ese rol
         const { data: rolesPermissions, error: rolesPermissionsError } = await supabase
@@ -69,33 +80,24 @@ const MainScreen = ({ navigation }) => {
     fetchUserPermissions();
   }, []);
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    navigation.replace('Login');
-  };
-
   return (
     <View style={{ flex: 1, backgroundColor: '#6C63FF' }}>
-      {/* Top bar: logout */}
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={handleLogout} style={styles.logoutIcon}>
-          <MaterialIcons name="logout" size={28} color="#d9534f" />
-        </TouchableOpacity>
-      </View>
-
       {/* Contenedor principal blanco redondeado */}
       <View style={styles.container}>
         <View style={styles.content}>
-          <Text style={styles.title}>Bienvenido a CargoApp</Text>
-          <Text style={styles.subtitle}>Selecciona una opción para continuar</Text>
+          {/* Encabezado tipo Rappi con usuario y rol */}
+          <View style={styles.userHeader}>
+            <View style={styles.avatarMock}>
+              <MaterialIcons name="person" size={20} color="#333" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.userNameText}>{displayName || 'Usuario'}</Text>
+              <Text style={styles.userRoleText}>{roleName ? `Rol: ${roleName}` : ''}</Text>
+            </View>
+          </View>
 
-          {/* Acción principal ejemplo */}
-          <TouchableOpacity
-            style={styles.primaryButton}
-            onPress={() => navigation.navigate('RegisterUser')}
-          >
-            <Text style={styles.primaryButtonText}>Registrar usuario</Text>
-          </TouchableOpacity>
+          {/* Pregunta principal */}
+          <Text style={styles.bigQuestion}>¿Qué quieres hacer hoy?</Text>
 
           {/* Estado de permisos (silencioso) */}
           {loading ? (
@@ -106,7 +108,7 @@ const MainScreen = ({ navigation }) => {
         </View>
       </View>
 
-  {/* Menú inferior ahora es proporcionado por Tab Navigator */}
+      {/* Menú inferior ahora es proporcionado por Tab Navigator */}
     </View>
   );
 };
@@ -127,12 +129,6 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 480,
     marginTop: 24,
-  },
-  topBar: {
-    position: 'absolute',
-    top: 40,
-    right: 20,
-    zIndex: 20,
   },
   title: { fontSize: 24, fontWeight: 'bold', color: '#333', textAlign: 'center', marginBottom: 6 },
   subtitle: { fontSize: 15, color: '#666', textAlign: 'center', marginBottom: 16 },
@@ -173,38 +169,31 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 6,
   },
-  primaryButton: {
-    backgroundColor: '#FFD23F',
-    paddingVertical: 14,
-    borderRadius: 10,
+  userHeader: {
+    flexDirection: 'row',
     alignItems: 'center',
     marginTop: 8,
+    marginBottom: 12,
   },
-  primaryButtonText: {
-    color: '#333',
-    fontSize: 17,
-    fontWeight: '600',
+  avatarMock: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F3F4F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
   },
+  userNameText: { fontSize: 16, fontWeight: '700', color: '#333' },
+  userRoleText: { fontSize: 12, color: '#666' },
+  bigQuestion: { fontSize: 20, fontWeight: '700', color: '#333', marginTop: 8 },
   noPermText: {
     color: '#333',
     fontSize: 15,
     textAlign: 'center',
     marginTop: 10,
   },
-  logoutIcon: {
-  padding: 8,
-  borderRadius: 20,
-  backgroundColor: '#fff',
-  elevation: 2,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.1,
-  shadowRadius: 2,
-  borderTopLeftRadius: 8,
-  borderBottomLeftRadius: 20,
-  borderTopRightRadius: 20,
-  borderBottomRightRadius: 8,
-},
+  // Logout movido a AccountScreen
   // bottomNav styles removidos (Tab Navigator se encarga)
 
 });
