@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Platform,
   Image,
+  ActionSheetIOS,
 } from "react-native";
 import { Picker } from "@react-native-picker/picker";
 import { supabase } from "./supabaseClient";
@@ -111,6 +112,30 @@ const RegisterUserScreen = ({ navigation }) => {
       setLoading(false);
       return;
     }
+
+      // Helpers para iOS ActionSheet
+      const showActionSheet = (title, items, currentValue, onSelect) => {
+        const options = ["Cancelar", ...items.map((i) => i.label)];
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            title,
+            options,
+            cancelButtonIndex: 0,
+            userInterfaceStyle: "light",
+          },
+          (buttonIndex) => {
+            if (buttonIndex > 0) {
+              const item = items[buttonIndex - 1];
+              onSelect(item.value);
+            }
+          }
+        );
+      };
+
+      const getSelectedLabel = (items, value) => {
+        const found = items.find((i) => String(i.value) === String(value));
+        return found ? found.label : "";
+      };
 
     // Obtener la sesión actual (admin logueado)
     const { data: { session } } = await supabase.auth.getSession();
@@ -279,39 +304,81 @@ const RegisterUserScreen = ({ navigation }) => {
             <ActivityIndicator size="large" color="#007bff" />
           ) : (
             <>
-              <View style={styles.dropdown}>
-                <Picker
-                  selectedValue={form.company_id}
-                  onValueChange={(v) => handleChange("company_id", v)}
-                  style={styles.picker}
-                >
-                  <Picker.Item label="Selecciona una empresa" value="" />
-                  {companies.map((c) => (
-                    <Picker.Item
-                      key={c.company_id}
-                      label={c.name}
-                      value={String(c.company_id)}
-                    />
-                  ))}
-                </Picker>
-              </View>
+              {Platform.OS === 'ios' ? (
+                <>
+                  {/* Empresa - iOS ActionSheet */}
+                  <TouchableOpacity
+                    style={styles.dropdown}
+                    onPress={() =>
+                      showActionSheet(
+                        'Selecciona una empresa',
+                        companies.map((c) => ({ label: c.name, value: String(c.company_id) })),
+                        form.company_id,
+                        (val) => handleChange('company_id', val)
+                      )
+                    }
+                  >
+                    <Text style={styles.dropdownText}>
+                      {getSelectedLabel(
+                        companies.map((c) => ({ label: c.name, value: String(c.company_id) })),
+                        form.company_id
+                      ) || 'Selecciona una empresa'}
+                    </Text>
+                    <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+                  </TouchableOpacity>
 
-              <View style={styles.dropdown}>
-                <Picker
-                  selectedValue={form.role_id}
-                  onValueChange={(v) => handleChange("role_id", v)}
-                  style={styles.picker}
-                >
-                  <Picker.Item label="Selecciona un rol" value="" />
-                  {roles.map((r) => (
-                    <Picker.Item
-                      key={r.id}
-                      label={r.role_name}
-                      value={String(r.id)}
-                    />
-                  ))}
-                </Picker>
-              </View>
+                  {/* Rol - iOS ActionSheet */}
+                  <TouchableOpacity
+                    style={styles.dropdown}
+                    onPress={() =>
+                      showActionSheet(
+                        'Selecciona un rol',
+                        roles.map((r) => ({ label: r.role_name, value: String(r.id) })),
+                        form.role_id,
+                        (val) => handleChange('role_id', val)
+                      )
+                    }
+                  >
+                    <Text style={styles.dropdownText}>
+                      {getSelectedLabel(
+                        roles.map((r) => ({ label: r.role_name, value: String(r.id) })),
+                        form.role_id
+                      ) || 'Selecciona un rol'}
+                    </Text>
+                    <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  {/* Empresa - Android Picker */}
+                  <View style={styles.dropdown}>
+                    <Picker
+                      selectedValue={form.company_id}
+                      onValueChange={(v) => handleChange('company_id', v)}
+                      style={styles.picker}
+                    >
+                      <Picker.Item label="Selecciona una empresa" value="" />
+                      {companies.map((c) => (
+                        <Picker.Item key={c.company_id} label={c.name} value={String(c.company_id)} />
+                      ))}
+                    </Picker>
+                  </View>
+
+                  {/* Rol - Android Picker */}
+                  <View style={styles.dropdown}>
+                    <Picker
+                      selectedValue={form.role_id}
+                      onValueChange={(v) => handleChange('role_id', v)}
+                      style={styles.picker}
+                    >
+                      <Picker.Item label="Selecciona un rol" value="" />
+                      {roles.map((r) => (
+                        <Picker.Item key={r.id} label={r.role_name} value={String(r.id)} />
+                      ))}
+                    </Picker>
+                  </View>
+                </>
+              )}
             </>
           )}
 
@@ -425,6 +492,17 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   backgroundColor: "#F3F4F6",
   overflow: 'hidden',
+  },
+  dropdownText: {
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    color: '#333',
+    fontSize: 16,
+  },
+  dropdownIcon: {
+    position: 'absolute',
+    right: 10,
+    top: 12,
   },
   picker: {
   height: 50,

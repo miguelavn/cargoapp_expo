@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, Button, FlatList, ActivityIndicator, TouchableOpacity, } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
 import { supabase } from './supabaseClient';
 import { MaterialIcons } from '@expo/vector-icons';
 
@@ -20,11 +20,7 @@ const MainScreen = ({ navigation }) => {
       try {
         // 1. Obtener usuario actual
         const { data: { user } } = await supabase.auth.getUser();
-        if (!user) throw new Error("No se encontró usuario logueado");
-
-
-        alert(user.id);
-        
+        if (!user) throw new Error("No se encontró usuario logueado");    
         // 2. Buscar en app_users por auth_id
         const { data: appUser, error: appUserError } = await supabase
           .from('app_users')
@@ -79,51 +75,58 @@ const MainScreen = ({ navigation }) => {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={{ flex: 1, backgroundColor: '#6C63FF' }}>
+      {/* Top bar: logout */}
       <View style={styles.topBar}>
-      <TouchableOpacity onPress={handleLogout} style={styles.logoutIcon}>
-        <MaterialIcons name="logout" size={28} color="#d9534f" />
-      </TouchableOpacity>
-    </View>
-      <Text style={styles.title}>Bienvenido a CargoApp</Text>
-      <Text style={styles.subtitle}>Pantalla principal</Text>
-      <Button title="Ir a registro de usuario" onPress={() => navigation.navigate('RegisterUser')} color="#007bff" />
+        <TouchableOpacity onPress={handleLogout} style={styles.logoutIcon}>
+          <MaterialIcons name="logout" size={28} color="#d9534f" />
+        </TouchableOpacity>
+      </View>
 
+      {/* Contenedor principal blanco redondeado */}
+      <View style={styles.container}>
+        <View style={styles.content}>
+          <Text style={styles.title}>Bienvenido a CargoApp</Text>
+          <Text style={styles.subtitle}>Selecciona una opción para continuar</Text>
 
-      {/* Los permisos ya no se muestran, pero se guardan en contexto global */}
-      {loading ? (
-          <Text style={{ color: '#007bff', marginTop: 20 }}>Cargando permisos...</Text>
-        ) : error ? (
-          <Text style={{ color: 'red', marginTop: 20 }}>{error}</Text>
-        ) : permissions.length === 0 ? (
-          <Text style={{ color: '#333', marginTop: 20 }}>No tiene permisos asignados.</Text>
-        ) : (
-          <View style={{ marginTop: 20, width: '100%' }}>
-            <Text style={{ fontWeight: 'bold', color: '#007bff', marginBottom: 8, textAlign: 'center' }}>Permisos del usuario:</Text>
-            {permissions.map((perm) => (
-              <View key={perm.id} style={{ backgroundColor: '#f9f9f9', borderRadius: 8, padding: 8, marginBottom: 6 }}>
-                <Text style={{ color: '#333', fontWeight: '600' }}>{perm.permission_name}</Text>
-                {perm.description ? (
-                  <Text style={{ color: '#666', fontSize: 13 }}>{perm.description}</Text>
-                ) : null}
-              </View>
-            ))}
-          </View>
-        )}
+          {/* Acción principal ejemplo */}
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={() => navigation.navigate('RegisterUser')}
+          >
+            <Text style={styles.primaryButtonText}>Registrar usuario</Text>
+          </TouchableOpacity>
 
+          {/* Estado de permisos (silencioso) */}
+          {loading ? (
+            <Text style={styles.infoText}>Cargando permisos...</Text>
+          ) : error ? (
+            <Text style={styles.errorText}>{error}</Text>
+          ) : null}
+        </View>
+      </View>
 
-        
+  {/* Menú inferior ahora es proporcionado por Tab Navigator */}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
+    backgroundColor: '#fff',
     flex: 1,
-    justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#e3f0ff',
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 90, // dejar espacio para el bottom nav
+    borderTopLeftRadius: 40,
+    borderTopRightRadius: 40,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 200,
+  },
+  content: {
+    width: '100%',
+    maxWidth: 480,
+    marginTop: 24,
   },
   topBar: {
     position: 'absolute',
@@ -131,17 +134,8 @@ const styles = StyleSheet.create({
     right: 20,
     zIndex: 20,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#007bff',
-    marginBottom: 10,
-  },
-  subtitle: {
-    fontSize: 18,
-    color: '#333',
-    marginBottom: 30,
-  },
+  title: { fontSize: 24, fontWeight: 'bold', color: '#333', textAlign: 'center', marginBottom: 6 },
+  subtitle: { fontSize: 15, color: '#666', textAlign: 'center', marginBottom: 16 },
   permissionsTitle: {
     fontSize: 18,
     fontWeight: 'bold',
@@ -174,6 +168,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
   },
+  infoText: {
+    color: '#007bff',
+    textAlign: 'center',
+    marginTop: 6,
+  },
+  primaryButton: {
+    backgroundColor: '#FFD23F',
+    paddingVertical: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  primaryButtonText: {
+    color: '#333',
+    fontSize: 17,
+    fontWeight: '600',
+  },
   noPermText: {
     color: '#333',
     fontSize: 15,
@@ -194,6 +205,7 @@ const styles = StyleSheet.create({
   borderTopRightRadius: 20,
   borderBottomRightRadius: 8,
 },
+  // bottomNav styles removidos (Tab Navigator se encarga)
 
 });
 
