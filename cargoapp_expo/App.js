@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Text, View, Pressable } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import RegisterUserScreen from './RegisterUserScreen';
@@ -14,7 +15,7 @@ import PasswordResetSuccessScreen from './PasswordResetSuccessScreen';
 
 const Stack = createNativeStackNavigator();
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 
 const Tab = createBottomTabNavigator();
 
@@ -26,7 +27,6 @@ function TabNavigator() {
         tabBarShowLabel: true,
         tabBarActiveTintColor: '#6C63FF',
         tabBarInactiveTintColor: '#666',
-        tabBarActiveBackgroundColor: '#FFF4CC',
         tabBarLabelStyle: { fontSize: 11, marginTop: -2 },
         tabBarStyle: {
           position: 'absolute',
@@ -44,23 +44,43 @@ function TabNavigator() {
           shadowRadius: 6,
           elevation: 6,
         },
-        tabBarIcon: ({ color, size }) => {
-          switch (route.name) {
-            case 'Inicio':
-              return <MaterialIcons name="home" size={26} color={color} />;
-            case 'Servicios':
-              return <MaterialIcons name="local-taxi" size={26} color={color} />;
-            case 'Vehículo':
-              return <MaterialIcons name="directions-car" size={26} color={color} />;
-            case 'Cuenta':
-              return <MaterialIcons name="account-circle" size={26} color={color} />;
-            default:
-              return null;
+        tabBarItemStyle: { borderRadius: 14, marginHorizontal: 6 },
+        tabBarButton: (props) => (
+          <Pressable
+            {...props}
+            android_ripple={{ color: '#FFF4CC', borderless: true, radius: 36 }}
+            style={[props.style, { borderRadius: 999 }]}
+          />
+        ),
+        tabBarIcon: ({ color, focused }) => {
+          if (route.name === 'Inicio') {
+            const homeName = focused ? 'home-variant' : 'home-variant-outline';
+            return <MaterialCommunityIcons name={homeName} size={26} color={color} />;
           }
+          let name = 'home';
+          switch (route.name) {
+            case 'Servicios':
+              name = 'local-taxi';
+              break;
+            case 'Vehículo':
+              name = 'directions-car';
+              break;
+            case 'Cuenta':
+              name = 'account-circle';
+              break;
+            default:
+              name = 'home';
+          }
+          return <MaterialIcons name={name} size={26} color={color} />;
         },
+        tabBarLabel: ({ focused, color }) => (
+          <Text style={{ color, fontSize: 11, fontWeight: focused ? '700' : '600' }}>
+            {route.name}
+          </Text>
+        ),
       })}
     >
-      <Tab.Screen name="Inicio" component={MainScreen} />
+  <Tab.Screen name="Inicio" component={MainScreen} />
       <Tab.Screen name="Servicios" component={ServicesScreen} />
       <Tab.Screen name="Vehículo" component={VehicleScreen} />
       <Tab.Screen name="Cuenta" component={AccountScreen} />

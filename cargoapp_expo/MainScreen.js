@@ -1,7 +1,11 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { supabase } from './supabaseClient';
 import { MaterialIcons } from '@expo/vector-icons';
+import AdminMain from './screens/main/roles/AdminMain';
+import DriverMain from './screens/main/roles/DriverMain';
+import CoordinatorMain from './screens/main/roles/CoordinatorMain';
+import CustomerMain from './screens/main/roles/CustomerMain';
 
 // Contexto para guardar permisos globalmente
 import { createContext, useContext } from 'react';
@@ -13,6 +17,8 @@ const MainScreen = ({ navigation }) => {
   const [error, setError] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [roleName, setRoleName] = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const noRoleHandled = useRef(false);
   const setGlobalPermissions = useContext(PermissionsContext)[1] || (()=>{});
   const getGreeting = () => {
     const h = new Date().getHours();
@@ -32,27 +38,39 @@ const MainScreen = ({ navigation }) => {
         // 2. Buscar en app_users por auth_id
         const { data: appUser, error: appUserError } = await supabase
           .from('app_users')
-          .select('user_id, name, last_name')
+          .select('user_id, name, last_name, company_id')
           .eq('auth_id', user.id)
           .single();
         if (appUserError || !appUser) throw new Error("No se encontró el usuario en app_users");
         setDisplayName(appUser.name ? `${appUser.name} ${appUser.last_name ?? ''}`.trim() : (user.email || 'Usuario'));
 
-        // 3. Buscar el rol del usuario
+        // 3. Buscar el rol activo del usuario (default_role = true)
         const { data: userRole, error: userRoleError } = await supabase
           .from('users_roles')
-          .select('role_id')
+          .select('role_id, default_role, roles(role_name)')
           .eq('user_id', appUser.user_id)
-          .single();
-        if (userRoleError || !userRole) throw new Error("No se encontró el rol del usuario");
+          .eq('default_role', true)
+          .maybeSingle();
+  if (userRoleError || !userRole) {
+          throw new Error("No se encontró un rol activo asignado a tu usuario.");
+        }
 
-        // 3.1 Obtener nombre del rol
-        const { data: roleData, error: roleErr } = await supabase
-          .from('roles')
-          .select('role_name')
-          .eq('id', userRole.role_id)
-          .single();
-        if (!roleErr && roleData) setRoleName(roleData.role_name);
+        // 3.1 Obtener nombre del rol desde el join
+        if (userRole?.roles?.role_name) setRoleName(userRole.roles.role_name);
+
+        // 3.2 Si NO es Administrador global, obtener nombre de la empresa (si hay company_id)
+        const lowerRole = (userRole?.roles?.role_name || '').toLowerCase();
+        if (!lowerRole.includes('administrador global') && appUser?.company_id) {
+          const { data: company, error: compErr } = await supabase
+            .from('companies')
+            .select('name')
+            .eq('company_id', appUser.company_id)
+            .maybeSingle();
+          if (!compErr && company?.name) setCompanyName(company.name);
+          else setCompanyName('');
+        } else {
+          setCompanyName('');
+        }
 
         // 4. Buscar los permisos asociados a ese rol
         const { data: rolesPermissions, error: rolesPermissionsError } = await supabase
@@ -80,6 +98,23 @@ const MainScreen = ({ navigation }) => {
       } catch (err) {
         setError(err.message);
         setPermissions([]);
+        if (!noRoleHandled.current && String(err?.message || '').toLowerCase().includes('rol activo')) {
+          noRoleHandled.current = true;
+          Alert.alert(
+            'Sin rol asignado',
+            'No se encontró un rol activo asignado a tu cuenta. Volverás al inicio de sesión.',
+            [
+              {
+                text: 'Aceptar',
+                onPress: async () => {
+                  try { await supabase.auth.signOut(); } catch (_) {}
+                  navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+                },
+              },
+            ],
+            { cancelable: false }
+          );
+        }
       }
       setLoading(false);
     };
@@ -99,11 +134,25 @@ const MainScreen = ({ navigation }) => {
             <View style={{ flex: 1 }}>
         <Text style={styles.userNameText}>{getGreeting()}, {displayName || 'Usuario'}</Text>
         <Text style={styles.userRoleText}>{roleName ? roleName : ''}</Text>
+        {!!companyName && (
+              <Text style={styles.companyNameText}>{companyName}</Text>
+            )}
             </View>
           </View>
 
           {/* Pregunta principal */}
           <Text style={styles.bigQuestion}>¿Qué quieres hacer hoy?</Text>
+
+          {/* Contenido según rol dentro del panel, incrustado */}
+          {roleName?.toLowerCase().includes('administrador') ? (
+            <AdminMain permissions={permissions} />
+          ) : roleName?.toLowerCase().includes('coordinador') ? (
+            <CoordinatorMain />
+          ) : roleName?.toLowerCase().includes('conductor') ? (
+            <DriverMain />
+          ) : (
+            <CustomerMain />
+          )}
 
           {/* Estado de permisos (silencioso) */}
           {loading ? (
@@ -126,8 +175,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingBottom: 90, // dejar espacio para el bottom nav
-    borderTopLeftRadius: 40,
-    borderTopRightRadius: 40,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 200,
   },
@@ -192,6 +241,7 @@ const styles = StyleSheet.create({
   },
   userNameText: { fontSize: 16, fontWeight: '700', color: '#333' },
   userRoleText: { fontSize: 12, color: '#666' },
+  companyNameText: { fontSize: 12, color: '#888' },
   bigQuestion: { fontSize: 22, fontWeight: '800', color: '#333', marginTop: 8 },
   noPermText: {
     color: '#333',
