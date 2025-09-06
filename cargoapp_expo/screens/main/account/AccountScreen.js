@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { supabase } from './supabaseClient';
+import { supabase } from '../../../supabaseClient';
 
 export default function AccountScreen({ navigation }) {
   const handleLogout = async () => {

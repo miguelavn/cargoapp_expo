@@ -12,7 +12,7 @@ import {
   ActionSheetIOS,
 } from "react-native";
 import { Picker } from "@react-native-picker/picker";
-import { supabase } from "./supabaseClient";
+import { supabase } from "../../../supabaseClient";
 import { MaterialIcons } from "@expo/vector-icons";
 import { Ionicons } from "@expo/vector-icons";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
@@ -206,7 +206,7 @@ const RegisterUserScreen = ({ navigation }) => {
       {/* Encabezado con ilustración */}
       <View style={styles.header}>
         <Image
-          source={require("./assets/register.png")}
+          source={require("../../../assets/register.png")}
           style={styles.headerImage}
           resizeMode="contain"
         />

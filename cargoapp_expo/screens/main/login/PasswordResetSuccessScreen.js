@@ -9,7 +9,7 @@ export default function PasswordResetSuccessScreen({ navigation }) {
       {/* Encabezado con ilustración */}
       <View style={styles.header}>
         <Image
-          source={require("./assets/resetPassword.png")}
+          source={require("../../../assets/resetPassword.png")}
           style={styles.headerImage}
           resizeMode="contain"
         />

@@ -10,7 +10,7 @@ import {
   Platform,
   Image,
 } from "react-native";
-import { supabase } from "./supabaseClient";
+import { supabase } from "../../../supabaseClient";
 import { MaterialIcons } from "@expo/vector-icons";
 import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
 
@@ -76,7 +76,7 @@ const LoginScreen = ({ navigation }) => {
     {/* Encabezado con ilustración */}
     <View style={styles.header}>
       <Image
-        source={require("./assets/login.png")}
+        source={require("../../../assets/login.png")}
         style={styles.headerImage}
         resizeMode="contain"
       />

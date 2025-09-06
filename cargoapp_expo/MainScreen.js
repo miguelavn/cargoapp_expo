@@ -28,77 +28,50 @@ const MainScreen = ({ navigation }) => {
   };
 
   useEffect(() => {
-    const fetchUserPermissions = async () => {
+    const fetchFromView = async () => {
       setLoading(true);
-      setError("");
+      setError('');
       try {
-        // 1. Obtener usuario actual
         const { data: { user } } = await supabase.auth.getUser();
-        if (!user) throw new Error("No se encontró usuario logueado");    
-        // 2. Buscar en app_users por auth_id
-        const { data: appUser, error: appUserError } = await supabase
-          .from('app_users')
-          .select('user_id, name, last_name, company_id')
+        if (!user) throw new Error('No se encontró usuario logueado');
+
+        // Consulta directa a la vista 
+        const { data: row, error: viewError } = await supabase
+          .from('user_active_role_permissions')
+          .select('*')
           .eq('auth_id', user.id)
-          .single();
-        if (appUserError || !appUser) throw new Error("No se encontró el usuario en app_users");
-        setDisplayName(appUser.name ? `${appUser.name} ${appUser.last_name ?? ''}`.trim() : (user.email || 'Usuario'));
-
-        // 3. Buscar el rol activo del usuario (default_role = true)
-        const { data: userRole, error: userRoleError } = await supabase
-          .from('users_roles')
-          .select('role_id, default_role, roles(role_name)')
-          .eq('user_id', appUser.user_id)
-          .eq('default_role', true)
           .maybeSingle();
-  if (userRoleError || !userRole) {
-          throw new Error("No se encontró un rol activo asignado a tu usuario.");
-        }
 
-        // 3.1 Obtener nombre del rol desde el join
-        if (userRole?.roles?.role_name) setRoleName(userRole.roles.role_name);
+        if (viewError) throw viewError;
+        if (!row) throw new Error('No se encontró un rol activo asignado a tu usuario.');
 
-        // 3.2 Si NO es Administrador global, obtener nombre de la empresa (si hay company_id)
-        const lowerRole = (userRole?.roles?.role_name || '').toLowerCase();
-        if (!lowerRole.includes('administrador global') && appUser?.company_id) {
-          const { data: company, error: compErr } = await supabase
-            .from('companies')
-            .select('name')
-            .eq('company_id', appUser.company_id)
-            .maybeSingle();
-          if (!compErr && company?.name) setCompanyName(company.name);
-          else setCompanyName('');
+        setDisplayName(row.display_name || user.email || 'Usuario');
+        setRoleName(row.role_name || '');
+
+        // Empresa sólo si no es Administrador global
+        if (row.role_name && !row.role_name.toLowerCase().includes('administrador global')) {
+          setCompanyName(row.company_name || '');
         } else {
           setCompanyName('');
         }
 
-        // 4. Buscar los permisos asociados a ese rol
-        const { data: rolesPermissions, error: rolesPermissionsError } = await supabase
-          .from('roles_permissions')
-          .select('permission_id')
-          .eq('role_id', userRole.role_id);
-        if (rolesPermissionsError) throw new Error("No se encontraron permisos para el rol");
-
-        const permissionIds = rolesPermissions.map(rp => rp.permission_id);
-        if (permissionIds.length === 0) {
-          setPermissions([]);
-          setLoading(false);
-          return;
+        // Permisos: preferimos el array detallado (permissions_full) si existe
+        let perms = [];
+        if (Array.isArray(row.permissions_full) && row.permissions_full.length > 0) {
+          perms = row.permissions_full.map(p => ({
+            id: p.id,
+            permission_name: p.permission_name,
+            description: p.description,
+          }));
+        } else if (Array.isArray(row.permissions)) {
+          perms = row.permissions.map((name, idx) => ({ id: idx, permission_name: name, description: '' }));
         }
-
-        // 5. Obtener los nombres de los permisos
-        const { data: permissionsData, error: permissionsError } = await supabase
-          .from('permissions')
-          .select('permission_name, description, id')
-          .in('id', permissionIds);
-        if (permissionsError) throw new Error("Error al obtener los permisos");
-
-  setPermissions(permissionsData);
-  setGlobalPermissions(permissionsData);
+        setPermissions(perms);
+        setGlobalPermissions(perms);
       } catch (err) {
         setError(err.message);
         setPermissions([]);
-        if (!noRoleHandled.current && String(err?.message || '').toLowerCase().includes('rol activo')) {
+        if (!noRoleHandled.current && /rol activo/i.test(err.message)) {
           noRoleHandled.current = true;
           Alert.alert(
             'Sin rol asignado',
@@ -118,7 +91,7 @@ const MainScreen = ({ navigation }) => {
       }
       setLoading(false);
     };
-    fetchUserPermissions();
+    fetchFromView();
   }, []);
 
   return (
@@ -145,7 +118,7 @@ const MainScreen = ({ navigation }) => {
 
           {/* Contenido según rol dentro del panel, incrustado */}
           {roleName?.toLowerCase().includes('administrador') ? (
-            <AdminMain permissions={permissions} />
+            <AdminMain permissions={permissions} navigation={navigation} />
           ) : roleName?.toLowerCase().includes('coordinador') ? (
             <CoordinatorMain />
           ) : roleName?.toLowerCase().includes('conductor') ? (

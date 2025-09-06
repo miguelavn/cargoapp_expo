@@ -2,16 +2,17 @@ import * as React from 'react';
 import { Text, View, Pressable } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import RegisterUserScreen from './RegisterUserScreen';
+import RegisterUserScreen from './screens/main/userRegister/RegisterUserScreen';
 import MainScreen from './MainScreen';
-import LoginScreen from './LoginScreen';
-import ServicesScreen from './ServicesScreen';
-import VehicleScreen from './VehicleScreen';
-import AccountScreen from './AccountScreen';
+import LoginScreen from './screens/main/login/LoginScreen';
+import ServicesScreen from './screens/main/services/ServicesScreen';
+import UsersListScreen from './UsersListScreen';
+import VehicleScreen from './screens/main/vehicle/VehicleScreen';
+import AccountScreen from './screens/main/account/AccountScreen';
 
-import ForgotPasswordScreen from './ForgotPasswordScreen';
-import VerifyCodeScreen from './VerifyCodeScreen';
-import PasswordResetSuccessScreen from './PasswordResetSuccessScreen';
+import ForgotPasswordScreen from './screens/main/login/ForgotPasswordScreen';
+import VerifyCodeScreen from './screens/main/login/VerifyCodeScreen';
+import PasswordResetSuccessScreen from './screens/main/login/PasswordResetSuccessScreen';
 
 const Stack = createNativeStackNavigator();
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -100,6 +101,11 @@ export default function App() {
         <Stack.Screen 
           name="Principal" 
           component={TabNavigator} 
+          options={{ headerShown: false }} 
+        />
+        <Stack.Screen 
+          name="UsersList" 
+          component={UsersListScreen} 
           options={{ headerShown: false }} 
         />
         <Stack.Screen 
