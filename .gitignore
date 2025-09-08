@@ -1,0 +1,54 @@
+
+# Unificado desde raíz y cargoapp_expo
+# Más info: https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.orig.*
+
+# Logs
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+pnpm-debug.log*
+
+# Env files (mantén secretos fuera de git)
+.env
+.env.*
+.env*.local
+
+# Test/coverage
+coverage/
+.nyc_output/
+
+# Node / Expo outputs
+node_modules/
+.expo/
+dist/
+web-build/
+.metro-health-check*
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Expo generated types
+expo-env.d.ts
+
+# Optional native folders si se usa prebuild/eject
+android/
+ios/
+
+# Certificates/keys
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# Kotlin cache
+.kotlin/
