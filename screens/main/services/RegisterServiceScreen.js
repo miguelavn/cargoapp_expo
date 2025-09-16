@@ -15,6 +15,8 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const [loading, setLoading] = useState(false);
   const [projects, setProjects] = useState([]);
   const [vehicles, setVehicles] = useState([]);
+  const [materials, setMaterials] = useState([]); // materiales disponibles por proyecto (de órdenes de compra)
+  const [units, setUnits] = useState([]);
   // Esquema real de services: service: order_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, status
   const [form, setForm] = useState({
     order_id: '',
@@ -38,9 +40,20 @@ export default function RegisterServiceScreen({ navigation, route }) {
         setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
       } catch {}
       await loadVehicles();
+      await loadUnits();
       if (serviceId) await loadService(serviceId);
     })();
   }, []);
+
+  // Cargar materiales cuando cambia el proyecto, filtrados por órdenes de compra (order_type_id = 1)
+  useEffect(() => {
+    (async () => {
+      await loadMaterialsForProject(form.project_id);
+      // Al cambiar de proyecto, resetear material y unidad seleccionados
+      setForm((s) => ({ ...s, material_id: '', unit_id: '' }));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.project_id]);
 
   const loadVehicles = async () => {
     try {
@@ -66,6 +79,44 @@ export default function RegisterServiceScreen({ navigation, route }) {
       const { data } = await qb.order('plate');
       setVehicles((data || []).map((v) => ({ id: String(v.vehicle_id), name: v.plate })));
     } catch (e) {}
+  };
+
+  const loadMaterialsForProject = async (projectId) => {
+    try {
+      if (!projectId) {
+        setMaterials([]);
+        return;
+      }
+      // 1) Traer material_id desde order_details, filtrando por órdenes del proyecto con order_type_id = 1 (compras)
+      const { data: detailRows } = await supabase
+        .from('order_details')
+        .select('material_id, orders!inner(project_id, order_type_id)')
+        .eq('orders.project_id', Number(projectId))
+        .eq('orders.order_type_id', 1);
+
+      const ids = Array.from(new Set((detailRows || []).map((r) => r.material_id).filter((id) => id != null)));
+      if (!ids.length) {
+        setMaterials([]);
+        return;
+      }
+
+      // 2) Con esos IDs, traer info de materiales
+      const { data: mats } = await supabase
+        .from('materials')
+        .select('material_id, name, unit_id')
+        .in('material_id', ids);
+      setMaterials((mats || []).map((m) => ({ id: String(m.material_id), name: m.name, unit_id: m.unit_id != null ? String(m.unit_id) : '' })));
+    } catch (e) {
+      // En caso de fallo, dejar vacío
+      setMaterials([]);
+    }
+  };
+
+  const loadUnits = async () => {
+    try {
+      const { data } = await supabase.from('measurement_units').select('id, name');
+      setUnits((data || []).map((u) => ({ id: String(u.id), name: u.name })));
+    } catch {}
   };
 
   const loadService = async (id) => {
@@ -112,6 +163,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
 
   const onSubmit = async () => {
     const errs = {};
+    if (!form.project_id) errs.project_id = 'Selecciona un proyecto';
     if (!form.order_id) errs.order_id = 'Ingresa la orden relacionada';
     if (!form.vehicle_id) errs.vehicle_id = 'Selecciona un vehículo';
     if (!form.material_id) errs.material_id = 'Selecciona un material';
@@ -279,11 +331,83 @@ export default function RegisterServiceScreen({ navigation, route }) {
         <Text style={styles.fieldLabel}>Orden</Text>
         <TextInput style={styles.input} placeholder="ID de Orden" keyboardType="numeric" value={form.order_id} onChangeText={(v) => handleChange('order_id', v.replace(/[^0-9]/g, ''))} />
 
-        <Text style={styles.fieldLabel}>Material (ID)</Text>
-        <TextInput style={styles.input} placeholder="ID de Material" keyboardType="numeric" value={form.material_id} onChangeText={(v) => handleChange('material_id', v.replace(/[^0-9]/g, ''))} />
+        <Text style={styles.fieldLabel}>Material</Text>
+        {Platform.OS === 'ios' ? (
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => {
+              if (!form.project_id) {
+                Alert.alert('Selecciona un proyecto', 'Primero elige un proyecto para listar materiales.');
+                return;
+              }
+              const items = materials.map((m) => ({ label: m.name, value: m.id }));
+              const options = ['Cancelar', ...items.map((i) => i.label)];
+              ActionSheetIOS.showActionSheetWithOptions(
+                { title: 'Selecciona un material', options, cancelButtonIndex: 0 },
+                (idx) => {
+                  if (idx > 0) {
+                    const val = items[idx - 1].value;
+                    const mat = materials.find((m) => m.id === val);
+                    handleChange('material_id', val);
+                    if (mat?.unit_id) handleChange('unit_id', mat.unit_id); // autocompletar unidad
+                  }
+                }
+              );
+            }}
+          >
+            <Text style={styles.dropdownText}>
+              {materials.find((m) => m.id === form.material_id)?.name || (form.project_id ? 'Selecciona un material' : 'Selecciona un proyecto primero')}
+            </Text>
+            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.dropdown}>
+            <Picker
+              enabled={!!form.project_id}
+              selectedValue={form.material_id}
+              onValueChange={(v) => {
+                const mat = materials.find((m) => m.id === v);
+                handleChange('material_id', v);
+                if (mat?.unit_id) handleChange('unit_id', mat.unit_id);
+              }}
+              style={styles.picker}
+            >
+              <Picker.Item label={form.project_id ? 'Selecciona un material' : 'Selecciona un proyecto primero'} value="" />
+              {materials.map((m) => (
+                <Picker.Item key={m.id} label={m.name} value={m.id} />
+              ))}
+            </Picker>
+          </View>
+        )}
 
-        <Text style={styles.fieldLabel}>Unidad (ID)</Text>
-        <TextInput style={styles.input} placeholder="ID de Unidad" keyboardType="numeric" value={form.unit_id} onChangeText={(v) => handleChange('unit_id', v.replace(/[^0-9]/g, ''))} />
+        <Text style={styles.fieldLabel}>Unidad</Text>
+        {Platform.OS === 'ios' ? (
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => {
+              const items = units.map((u) => ({ label: u.name, value: u.id }));
+              const options = ['Cancelar', ...items.map((i) => i.label)];
+              ActionSheetIOS.showActionSheetWithOptions(
+                { title: 'Selecciona una unidad', options, cancelButtonIndex: 0 },
+                (idx) => { if (idx > 0) handleChange('unit_id', items[idx - 1].value); }
+              );
+            }}
+          >
+            <Text style={styles.dropdownText}>
+              {units.find((u) => u.id === form.unit_id)?.name || 'Selecciona una unidad'}
+            </Text>
+            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.dropdown}>
+            <Picker selectedValue={form.unit_id} onValueChange={(v) => handleChange('unit_id', v)} style={styles.picker}>
+              <Picker.Item label="Selecciona una unidad" value="" />
+              {units.map((u) => (
+                <Picker.Item key={u.id} label={u.name} value={u.id} />
+              ))}
+            </Picker>
+          </View>
+        )}
 
         <Text style={styles.fieldLabel}>Cantidad</Text>
         <TextInput style={styles.input} placeholder="Cantidad" keyboardType="numeric" value={form.quantity} onChangeText={(v) => handleChange('quantity', v.replace(/[^0-9.]/g, ''))} />
