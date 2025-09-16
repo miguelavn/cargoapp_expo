@@ -4,13 +4,13 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  SafeAreaView,
   ActivityIndicator,
   ScrollView,
   Platform,
   StatusBar,
   Alert,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../../supabaseClient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
@@ -27,6 +27,12 @@ const COLORS = {
 };
 
 export default function AccountScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
+  const notchThreshold = 44;
+  // Android: subir header (reducir padding artificial)
+  const headerTop = Platform.OS === 'ios'
+    ? (insets.top > notchThreshold ? insets.top - 6 : insets.top)
+    : 8;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [profile, setProfile] = useState(null);
@@ -163,7 +169,7 @@ export default function AccountScreen({ navigation }) {
           </View>
         )}
         {/* Header morado */}
-        <View style={styles.headerArea}>
+  <View style={[styles.headerArea, { paddingTop: headerTop }]}>
           <View style={styles.topBar}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
               <MaterialIcons name="arrow-back" size={22} color={COLORS.dark} />
@@ -183,7 +189,7 @@ export default function AccountScreen({ navigation }) {
         </View>
 
         {/* Contenido */}
-        <View style={styles.contentArea}>
+         <View style={styles.contentArea}>
           {loading && (
             <View style={{ paddingVertical: 40 }}>
               <ActivityIndicator size="large" color={COLORS.purple} />
@@ -233,23 +239,24 @@ export default function AccountScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: COLORS.purple,
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0,
-  },
+   safeArea: {
+     flex: 1,
+     backgroundColor: COLORS.white,
+     // removemos paddingTop en Android para que el header quede más alto
+     paddingTop: Platform.OS === 'android' ? 0 : 0,
+   },
   root: { flex: 1 },
   headerArea: {
     backgroundColor: COLORS.purple,
     paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 12, 
+  paddingTop: 0,
+  paddingBottom: 10, 
   },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 8, 
+  marginBottom: 6, 
   },
   backButton: {
     backgroundColor: COLORS.yellow,

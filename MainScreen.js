@@ -7,9 +7,7 @@ import DriverMain from './screens/main/roles/DriverMain';
 import CoordinatorMain from './screens/main/roles/CoordinatorMain';
 import CustomerMain from './screens/main/roles/CustomerMain';
 
-// Contexto para guardar permisos globalmente
-import { createContext, useContext } from 'react';
-export const PermissionsContext = createContext([]);
+import { usePermissions } from './contexts/PermissionsContext';
 
 const MainScreen = ({ navigation }) => {
   const [permissions, setPermissions] = useState([]);
@@ -19,7 +17,7 @@ const MainScreen = ({ navigation }) => {
   const [roleName, setRoleName] = useState("");
   const [companyName, setCompanyName] = useState("");
   const noRoleHandled = useRef(false);
-  const setGlobalPermissions = useContext(PermissionsContext)[1] || (()=>{});
+  const { setPermissions: setGlobalPermissions } = usePermissions();
   const getGreeting = () => {
     const h = new Date().getHours();
     if (h < 12) return 'Buenos días';
@@ -120,11 +118,11 @@ const MainScreen = ({ navigation }) => {
           {roleName?.toLowerCase().includes('administrador') ? (
             <AdminMain permissions={permissions} navigation={navigation} />
           ) : roleName?.toLowerCase().includes('coordinador') ? (
-            <CoordinatorMain />
+            <CoordinatorMain permissions={permissions} navigation={navigation} />
           ) : roleName?.toLowerCase().includes('conductor') ? (
             <DriverMain />
           ) : (
-            <CustomerMain />
+            <CustomerMain permissions={permissions} navigation={navigation} />
           )}
 
           {/* Estado de permisos (silencioso) */}

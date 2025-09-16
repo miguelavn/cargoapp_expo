@@ -45,6 +45,13 @@ export default function AdminMain({ permissions = [], navigation }) {
     if (hasPerm(permissions, 'view_all_projects_from_my_company')) {
       list.push({ key: 'projects', icon: 'briefcase-variant', label: 'Proyectos' });
     }
+    // Órdenes: visible si se tiene permiso de crear órdenes (global o por empresa)
+    if (
+      hasPerm(permissions, 'view_all_orders') ||
+      hasPerm(permissions, 'view_all_orders_from_my_company')
+    ) {
+      list.push({ key: 'orders', icon: 'file-document-edit', label: 'Órdenes' });
+    }
     // Reportes
     if (hasPerm(permissions, 'view_reports_from_my_company')) {
       list.push({ key: 'reports', icon: 'chart-line', label: 'Reportes' });
@@ -75,7 +82,9 @@ export default function AdminMain({ permissions = [], navigation }) {
               icon={a.icon}
               label={a.label}
               onPress={() => {
-        if (a.key === 'users') navigation?.navigate?.('UsersList', { permissions });
+                if (a.key === 'users') navigation?.navigate?.('UsersList', { permissions });
+                if (a.key === 'projects') navigation?.navigate?.('ProjectsList', { permissions });
+                if (a.key === 'orders') navigation?.navigate?.('OrdersList', { permissions });
               }}
             />
           ))}
