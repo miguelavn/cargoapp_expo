@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, ActionSheetIOS } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
@@ -50,8 +50,11 @@ export default function ServicesListScreen({ navigation, route }) {
         // Normalizar campos a nuestro render
         const norm = arr.map((it) => ({
           service_id: it.service_id ?? it.id,
-          status: it.status ?? it.state ?? 'CREATED',
+          project_name: it.project_name ?? it?.project?.name ?? null,
           created_at: it.created_at ?? it.date ?? null,
+          origin: it.origin ?? null,
+          destination: it.destination ?? null,
+          // Se mantiene por compatibilidad (p.ej. al abrir edición)
           order_id: it.order_id ?? it.orderId ?? null,
         }));
         setServices(norm);
@@ -59,15 +62,17 @@ export default function ServicesListScreen({ navigation, route }) {
         // Fallback directo: unir con orders para filtrar por proyecto
         let qb = supabase
           .from('services')
-          .select('service_id, status, created_at, order_id, orders!inner(project_id)')
+          .select('service_id, created_at, origin, destination, order_id, orders!inner(project_id)')
           .order('service_id', { ascending: false });
         if (projectId) qb = qb.eq('orders.project_id', Number(projectId));
         const { data } = await qb;
         const norm = (data || []).map((it) => ({
           service_id: it.service_id,
-          status: it.status,
           created_at: it.created_at,
           order_id: it.order_id,
+          project_name: null,
+          origin: it.origin ?? null,
+          destination: it.destination ?? null,
         }));
         setServices(norm);
       }
@@ -138,9 +143,10 @@ export default function ServicesListScreen({ navigation, route }) {
           keyExtractor={(it) => String(it.service_id)}
           renderItem={({ item }) => (
             <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId })}>
-              <Text style={styles.cardTitle} numberOfLines={2}>{`Orden #${item.order_id ?? '—'}`}</Text>
-              <Text style={styles.cardMeta}>Creado: {item.created_at ? String(item.created_at).slice(0, 10) : '—'}</Text>
-              <Text style={styles.cardMeta}>Estado: {item.status || '—'}</Text>
+              <Text style={styles.cardTitle} numberOfLines={2}>{item.project_name || 'Proyecto'}</Text>
+              <Text style={styles.cardMeta}>Fecha: {item.created_at ? String(item.created_at).slice(0, 10) : '—'}</Text>
+              <Text style={styles.cardMeta}>Origen: {item.origin || '—'}</Text>
+              <Text style={styles.cardMeta}>Destino: {item.destination || '—'}</Text>
             </TouchableOpacity>
           )}
           ItemSeparatorComponent={() => <View style={{ height: 8 }} />}

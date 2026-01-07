@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, Platform, Alert, ActionSheetIOS } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
 import { COLORS } from '../../../theme/colors';
@@ -15,11 +16,18 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const [loading, setLoading] = useState(false);
   const [projects, setProjects] = useState([]);
   const [vehicles, setVehicles] = useState([]);
-  const [materials, setMaterials] = useState([]); // materiales disponibles por proyecto (de órdenes de compra)
   const [units, setUnits] = useState([]);
-  // Esquema real de services: service: order_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, status
+  const [purchaseOptions, setPurchaseOptions] = useState([]); // filas de project_materials_availability
+  const [transportOptions, setTransportOptions] = useState([]); // filas de transport_orders_availability
+  const [statuses, setStatuses] = useState([]); // filas de service_status
+  
+
+  const [selectedAvailability, setSelectedAvailability] = useState(null); // numeric
+
+  // Esquema real de services (según DB): purchase_order_id, transport_order_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, material_supplier_id, transport_supplier_id, project_id, status_id
   const [form, setForm] = useState({
-    order_id: '',
+    purchase_order_id: '',
+    transport_order_id: '',
     project_id: route?.params?.projectId ? String(route.params.projectId) : '', // solo para facilitar filtro y UX
     vehicle_id: '',
     driver_id: '',
@@ -28,10 +36,14 @@ export default function RegisterServiceScreen({ navigation, route }) {
     quantity: '',
     origin: '',
     destination: '',
-    status: 'CREATED',
+    material_supplier_id: '',
+    transport_supplier_id: '',
+    status_id: '',
   });
 
   const handleChange = (k, v) => setForm((s) => ({ ...s, [k]: v }));
+
+  const prevTransportSupplierRef = useRef('');
 
   useEffect(() => {
     (async () => {
@@ -39,76 +51,123 @@ export default function RegisterServiceScreen({ navigation, route }) {
         const { data: pjs } = await supabase.from('projects').select('project_id, name, status').eq('status', true).order('name');
         setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
       } catch {}
-      await loadVehicles();
+      // No cargar vehículos hasta seleccionar una OT
+      setVehicles([]);
       await loadUnits();
+      await loadStatuses();
       if (serviceId) await loadService(serviceId);
     })();
   }, []);
 
-  // Cargar materiales cuando cambia el proyecto, filtrados por órdenes de compra (order_type_id = 1)
+  // Recargar vehículos cuando cambie el supplier de la orden de transporte
+  useEffect(() => {
+    const nextSupplierId = form.transport_supplier_id || '';
+    if (prevTransportSupplierRef.current === nextSupplierId) return;
+    prevTransportSupplierRef.current = nextSupplierId;
+
+    // Si cambia el supplier, resetear vehículo/conductor
+    setForm((s) => ({ ...s, vehicle_id: '', driver_id: '' }));
+
+    // Si aún no hay OT/supplier seleccionado, no mostrar vehículos
+    if (!nextSupplierId) {
+      setVehicles([]);
+      return;
+    }
+
+    loadVehicles(nextSupplierId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.transport_supplier_id]);
+
+  // La cantidad siempre se deriva del vehículo seleccionado (capacidad m3)
+  useEffect(() => {
+    if (!form.vehicle_id) {
+      setForm((s) => (s.quantity ? { ...s, quantity: '' } : s));
+      return;
+    }
+
+    const veh = vehicles.find((v) => String(v.id) === String(form.vehicle_id));
+    if (!veh || veh.capacity_m3 == null || Number.isNaN(Number(veh.capacity_m3))) {
+      setForm((s) => (s.quantity ? { ...s, quantity: '' } : s));
+      return;
+    }
+
+    const nextQty = String(veh.capacity_m3);
+    setForm((s) => (String(s.quantity) === nextQty ? s : { ...s, quantity: nextQty }));
+  }, [form.vehicle_id, vehicles]);
+
+  // Cargar disponibilidad cuando cambia el proyecto
   useEffect(() => {
     (async () => {
-      await loadMaterialsForProject(form.project_id);
-      // Al cambiar de proyecto, resetear material y unidad seleccionados
-      setForm((s) => ({ ...s, material_id: '', unit_id: '' }));
+      await loadAvailabilityForProject(form.project_id);
+
+      // Al cambiar de proyecto, resetear selecciones dependientes
+      setSelectedAvailability(null);
+      setForm((s) => ({
+        ...s,
+        purchase_order_id: '',
+        transport_order_id: '',
+        material_id: '',
+        unit_id: '',
+        material_supplier_id: '',
+        transport_supplier_id: '',
+      }));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.project_id]);
 
-  const loadVehicles = async () => {
+  const loadVehicles = async (transportSupplierId = '') => {
     try {
-      // Filtrar por empresa del usuario: activos y disponibles
-      const { data: { session } } = await supabase.auth.getSession();
-      const authId = session?.user?.id;
-      let companyId = null;
-      if (authId) {
-        const { data: appUser } = await supabase
-          .from('app_users')
-          .select('company_id')
-          .eq('auth_id', authId)
-          .maybeSingle();
-        companyId = appUser?.company_id ?? null;
-      }
-      // Esquema: vehicles(vehicle_id, is_active, is_available, company_id, plate)
+      // Esquema: vehicles(vehicle_id, plate, is_active, is_available, transport_supplier_id, driver_id)
       let qb = supabase
         .from('vehicles')
-        .select('vehicle_id, plate, is_active, is_available, company_id')
+        .select('vehicle_id, plate, model, capacity_m3, is_active, is_available, transport_supplier_id, driver_id')
         .eq('is_active', true)
         .eq('is_available', true);
-      if (companyId) qb = qb.eq('company_id', companyId);
+
+      // Si ya seleccionaron OT, filtrar por supplier de transporte
+      if (transportSupplierId) {
+        const sid = Number(transportSupplierId);
+        if (!Number.isNaN(sid)) qb = qb.eq('transport_supplier_id', sid);
+      }
+
       const { data } = await qb.order('plate');
-      setVehicles((data || []).map((v) => ({ id: String(v.vehicle_id), name: v.plate })));
+      setVehicles((data || []).map((v) => ({
+        id: String(v.vehicle_id),
+        name: v.plate,
+        label: [String(v.model || '').trim(), v.capacity_m3 != null ? `${v.capacity_m3} m³` : '', v.plate]
+          .filter((x) => String(x || '').trim())
+          .join(' - '),
+        capacity_m3: v.capacity_m3,
+        driver_id: v.driver_id != null ? String(v.driver_id) : '',
+      })));
     } catch (e) {}
   };
 
-  const loadMaterialsForProject = async (projectId) => {
+  const loadAvailabilityForProject = async (projectId) => {
     try {
       if (!projectId) {
-        setMaterials([]);
-        return;
-      }
-      // 1) Traer material_id desde order_details, filtrando por órdenes del proyecto con order_type_id = 1 (compras)
-      const { data: detailRows } = await supabase
-        .from('order_details')
-        .select('material_id, orders!inner(project_id, order_type_id)')
-        .eq('orders.project_id', Number(projectId))
-        .eq('orders.order_type_id', 1);
-
-      const ids = Array.from(new Set((detailRows || []).map((r) => r.material_id).filter((id) => id != null)));
-      if (!ids.length) {
-        setMaterials([]);
+        setPurchaseOptions([]);
+        setTransportOptions([]);
         return;
       }
 
-      // 2) Con esos IDs, traer info de materiales
-      const { data: mats } = await supabase
-        .from('materials')
-        .select('material_id, name, unit_id')
-        .in('material_id', ids);
-      setMaterials((mats || []).map((m) => ({ id: String(m.material_id), name: m.name, unit_id: m.unit_id != null ? String(m.unit_id) : '' })));
+      // Órdenes de compra + materiales disponibles
+      const { data: purchRows } = await supabase
+        .from('project_materials_availability')
+        .select('project_id, order_id, order_code, material_id, material_name, unit_id, unit_name, available, supplier_id, supplier_name')
+        .eq('project_id', Number(projectId));
+      setPurchaseOptions(Array.isArray(purchRows) ? purchRows : []);
+
+      // Órdenes de transporte + disponibilidad
+      const { data: trRows } = await supabase
+        .from('transport_orders_availability')
+        .select('project_id, order_id, order_code, unit_id, unit_name, total_available, quantity_required, transport_supplier_id, transport_supplier_name, pickup_location')
+        .eq('project_id', Number(projectId));
+      setTransportOptions(Array.isArray(trRows) ? trRows : []);
     } catch (e) {
       // En caso de fallo, dejar vacío
-      setMaterials([]);
+      setPurchaseOptions([]);
+      setTransportOptions([]);
     }
   };
 
@@ -119,6 +178,24 @@ export default function RegisterServiceScreen({ navigation, route }) {
     } catch {}
   };
 
+  const loadStatuses = async () => {
+    try {
+      const { data } = await supabase
+        .from('service_status')
+        .select('id, status_name')
+        .order('id', { ascending: true });
+      const list = (data || []).map((s) => ({ id: String(s.id), name: s.status_name }));
+      setStatuses(list);
+
+      // Default a CREATED si existe
+      setForm((prev) => {
+        if (prev.status_id) return prev;
+        const created = list.find((x) => String(x.name || '').toLowerCase() === 'created');
+        return { ...prev, status_id: created?.id || prev.status_id };
+      });
+    } catch {}
+  };
+
   const loadService = async (id) => {
     try {
       // Si tienes edge get-service úsala; si no, directo
@@ -126,8 +203,9 @@ export default function RegisterServiceScreen({ navigation, route }) {
         const res = await callEdgeFunction('get-service', { method: 'GET', query: { service_id: id } });
         const s = res?.service;
         if (s) setForm({
-          order_id: s.order_id ? String(s.order_id) : '',
-          project_id: s.project_id ? String(s.project_id) : '', // si la edge lo retorna
+          purchase_order_id: s.purchase_order_id ? String(s.purchase_order_id) : (s.order_id ? String(s.order_id) : ''),
+          transport_order_id: s.transport_order_id ? String(s.transport_order_id) : '',
+          project_id: s.project_id ? String(s.project_id) : '',
           vehicle_id: s.vehicle_id ? String(s.vehicle_id) : '',
           driver_id: s.driver_id ? String(s.driver_id) : '',
           material_id: s.material_id ? String(s.material_id) : '',
@@ -135,17 +213,20 @@ export default function RegisterServiceScreen({ navigation, route }) {
           quantity: s.quantity ? String(s.quantity) : '',
           origin: s.origin || '',
           destination: s.destination || '',
-          status: s.status || 'CREATED',
+          material_supplier_id: s.material_supplier_id ? String(s.material_supplier_id) : '',
+          transport_supplier_id: s.transport_supplier_id ? String(s.transport_supplier_id) : '',
+          status_id: s.status_id ? String(s.status_id) : '',
         });
       } catch {
         const { data } = await supabase
           .from('services')
-          .select('service_id, order_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, status')
+          .select('service_id, purchase_order_id, transport_order_id, project_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, material_supplier_id, transport_supplier_id, status_id')
           .eq('service_id', id)
           .maybeSingle();
         if (data) setForm({
-          order_id: data.order_id ? String(data.order_id) : '',
-          project_id: route?.params?.projectId ? String(route.params.projectId) : '',
+          purchase_order_id: data.purchase_order_id ? String(data.purchase_order_id) : '',
+          transport_order_id: data.transport_order_id ? String(data.transport_order_id) : '',
+          project_id: data.project_id ? String(data.project_id) : (route?.params?.projectId ? String(route.params.projectId) : ''),
           vehicle_id: data.vehicle_id ? String(data.vehicle_id) : '',
           driver_id: data.driver_id ? String(data.driver_id) : '',
           material_id: data.material_id ? String(data.material_id) : '',
@@ -153,7 +234,9 @@ export default function RegisterServiceScreen({ navigation, route }) {
           quantity: data.quantity ? String(data.quantity) : '',
           origin: data.origin || '',
           destination: data.destination || '',
-          status: data.status || 'CREATED',
+          material_supplier_id: data.material_supplier_id ? String(data.material_supplier_id) : '',
+          transport_supplier_id: data.transport_supplier_id ? String(data.transport_supplier_id) : '',
+          status_id: data.status_id ? String(data.status_id) : '',
         });
       }
     } catch (e) {
@@ -164,11 +247,16 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const onSubmit = async () => {
     const errs = {};
     if (!form.project_id) errs.project_id = 'Selecciona un proyecto';
-    if (!form.order_id) errs.order_id = 'Ingresa la orden relacionada';
+    if (!form.purchase_order_id) errs.purchase_order_id = 'Selecciona la orden de compra';
+    if (!form.transport_order_id) errs.transport_order_id = 'Selecciona la orden de transporte';
     if (!form.vehicle_id) errs.vehicle_id = 'Selecciona un vehículo';
+    if (!form.driver_id) errs.driver_id = 'Selecciona un conductor (o un vehículo con conductor)';
     if (!form.material_id) errs.material_id = 'Selecciona un material';
     if (!form.unit_id) errs.unit_id = 'Selecciona una unidad';
-    if (!form.quantity || isNaN(Number(form.quantity))) errs.quantity = 'Cantidad requerida (número)';
+    if (!form.quantity || isNaN(Number(form.quantity)) || Number(form.quantity) <= 0) errs.quantity = 'Cantidad requerida (capacidad del vehículo)';
+    if (selectedAvailability != null && !isNaN(Number(form.quantity)) && Number(form.quantity) > Number(selectedAvailability)) {
+      errs.quantity = `Cantidad supera disponible (${selectedAvailability})`;
+    }
     if (!form.destination?.trim()) errs.destination = 'Destino requerido';
     if (Object.keys(errs).length) return Alert.alert('Validación', Object.values(errs)[0]);
 
@@ -181,15 +269,21 @@ export default function RegisterServiceScreen({ navigation, route }) {
             method: 'POST',
             body: {
               service_id: serviceId,
-              order_id: Number(form.order_id),
+              // compat: algunas edges antiguas usaban order_id como transport_order_id
+              order_id: Number(form.transport_order_id),
+              purchase_order_id: Number(form.purchase_order_id),
+              transport_order_id: Number(form.transport_order_id),
+              project_id: form.project_id ? Number(form.project_id) : null,
               vehicle_id: Number(form.vehicle_id),
-              driver_id: form.driver_id ? Number(form.driver_id) : null,
+              driver_id: Number(form.driver_id),
               material_id: Number(form.material_id),
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
               origin: form.origin?.trim() || null,
               destination: form.destination.trim(),
-              status: form.status,
+              material_supplier_id: Number(form.material_supplier_id),
+              transport_supplier_id: Number(form.transport_supplier_id),
+              status_id: form.status_id ? Number(form.status_id) : null,
             },
           });
         } catch (e) {
@@ -197,15 +291,19 @@ export default function RegisterServiceScreen({ navigation, route }) {
           const { error } = await supabase
             .from('services')
             .update({
-              order_id: Number(form.order_id),
+              purchase_order_id: Number(form.purchase_order_id),
+              transport_order_id: Number(form.transport_order_id),
+              project_id: form.project_id ? Number(form.project_id) : null,
               vehicle_id: Number(form.vehicle_id),
-              driver_id: form.driver_id ? Number(form.driver_id) : null,
+              driver_id: Number(form.driver_id),
               material_id: Number(form.material_id),
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
               origin: form.origin?.trim() || null,
               destination: form.destination.trim(),
-              status: form.status,
+              material_supplier_id: Number(form.material_supplier_id),
+              transport_supplier_id: Number(form.transport_supplier_id),
+              status_id: form.status_id ? Number(form.status_id) : null,
             })
             .eq('service_id', serviceId);
           if (error) throw error;
@@ -219,28 +317,38 @@ export default function RegisterServiceScreen({ navigation, route }) {
           await callEdgeFunction('create-service', {
             method: 'POST',
             body: {
-              order_id: Number(form.order_id),
+              // compat: algunas edges antiguas usaban order_id como transport_order_id
+              order_id: Number(form.transport_order_id),
+              purchase_order_id: Number(form.purchase_order_id),
+              transport_order_id: Number(form.transport_order_id),
+              project_id: form.project_id ? Number(form.project_id) : null,
               vehicle_id: Number(form.vehicle_id),
-              driver_id: form.driver_id ? Number(form.driver_id) : null,
+              driver_id: Number(form.driver_id),
               material_id: Number(form.material_id),
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
               origin: form.origin?.trim() || null,
               destination: form.destination.trim(),
-              status: form.status,
+              material_supplier_id: Number(form.material_supplier_id),
+              transport_supplier_id: Number(form.transport_supplier_id),
+              status_id: form.status_id ? Number(form.status_id) : null,
             },
           });
         } catch (e) {
           const { error } = await supabase.from('services').insert({
-            order_id: Number(form.order_id),
+            purchase_order_id: Number(form.purchase_order_id),
+            transport_order_id: Number(form.transport_order_id),
+            project_id: form.project_id ? Number(form.project_id) : null,
             vehicle_id: Number(form.vehicle_id),
-            driver_id: form.driver_id ? Number(form.driver_id) : null,
+            driver_id: Number(form.driver_id),
             material_id: Number(form.material_id),
             unit_id: Number(form.unit_id),
             quantity: Number(form.quantity),
             origin: form.origin?.trim() || null,
             destination: form.destination.trim(),
-            status: form.status,
+            material_supplier_id: Number(form.material_supplier_id),
+            transport_supplier_id: Number(form.transport_supplier_id),
+            status_id: form.status_id ? Number(form.status_id) : null,
           });
           if (error) throw error;
         }
@@ -269,7 +377,14 @@ export default function RegisterServiceScreen({ navigation, route }) {
         </View>
       </View>
 
-      <View style={styles.container}>
+      <KeyboardAwareScrollView
+        style={styles.container}
+        contentContainerStyle={styles.containerContent}
+        keyboardShouldPersistTaps="handled"
+        enableOnAndroid
+        extraScrollHeight={24}
+        showsVerticalScrollIndicator={false}
+      >
         <Text style={styles.fieldLabel}>Proyecto</Text>
         {Platform.OS === 'ios' ? (
           <TouchableOpacity
@@ -299,64 +414,46 @@ export default function RegisterServiceScreen({ navigation, route }) {
           </View>
         )}
 
-        <Text style={styles.fieldLabel}>Vehículo</Text>
-        {Platform.OS === 'ios' ? (
-          <TouchableOpacity
-            style={styles.dropdown}
-            onPress={() => {
-              const items = vehicles.map((v) => ({ label: v.name, value: v.id }));
-              const options = ['Cancelar', ...items.map((i) => i.label)];
-              ActionSheetIOS.showActionSheetWithOptions(
-                { title: 'Selecciona un vehículo', options, cancelButtonIndex: 0 },
-                (idx) => { if (idx > 0) handleChange('vehicle_id', items[idx - 1].value); }
-              );
-            }}
-          >
-            <Text style={styles.dropdownText}>
-              {vehicles.find((v) => v.id === form.vehicle_id)?.name || 'Selecciona un vehículo'}
-            </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.dropdown}>
-            <Picker selectedValue={form.vehicle_id} onValueChange={(v) => handleChange('vehicle_id', v)} style={styles.picker}>
-              <Picker.Item label="Selecciona un vehículo" value="" />
-              {vehicles.map((v) => (
-                <Picker.Item key={v.id} label={v.name} value={v.id} />
-              ))}
-            </Picker>
-          </View>
-        )}
+     
 
-        <Text style={styles.fieldLabel}>Orden</Text>
-        <TextInput style={styles.input} placeholder="ID de Orden" keyboardType="numeric" value={form.order_id} onChangeText={(v) => handleChange('order_id', v.replace(/[^0-9]/g, ''))} />
-
-        <Text style={styles.fieldLabel}>Material</Text>
+        <Text style={styles.fieldLabel}>Orden de compra (Material)</Text>
         {Platform.OS === 'ios' ? (
           <TouchableOpacity
             style={styles.dropdown}
             onPress={() => {
               if (!form.project_id) {
-                Alert.alert('Selecciona un proyecto', 'Primero elige un proyecto para listar materiales.');
+                Alert.alert('Selecciona un proyecto', 'Primero elige un proyecto para listar órdenes de compra.');
                 return;
               }
-              const items = materials.map((m) => ({ label: m.name, value: m.id }));
+              const items = purchaseOptions.map((r) => ({
+                label: `${r.material_name} (${r.available} ${r.unit_name}) - OC ${r.order_code}`,
+                value: String(r.order_detail_id ?? `${r.order_id}-${r.material_id}`),
+                order_id: String(r.order_id),
+                material_id: String(r.material_id),
+                unit_id: String(r.unit_id),
+                supplier_id: String(r.supplier_id),
+                available: r.available,
+              }));
               const options = ['Cancelar', ...items.map((i) => i.label)];
               ActionSheetIOS.showActionSheetWithOptions(
-                { title: 'Selecciona un material', options, cancelButtonIndex: 0 },
+                { title: 'Selecciona material de orden de compra', options, cancelButtonIndex: 0 },
                 (idx) => {
                   if (idx > 0) {
-                    const val = items[idx - 1].value;
-                    const mat = materials.find((m) => m.id === val);
-                    handleChange('material_id', val);
-                    if (mat?.unit_id) handleChange('unit_id', mat.unit_id); // autocompletar unidad
+                    const picked = items[idx - 1];
+                    handleChange('purchase_order_id', picked.order_id);
+                    handleChange('material_id', picked.material_id);
+                    handleChange('unit_id', picked.unit_id);
+                    handleChange('material_supplier_id', picked.supplier_id);
+                    setSelectedAvailability(picked.available);
                   }
                 }
               );
             }}
           >
             <Text style={styles.dropdownText}>
-              {materials.find((m) => m.id === form.material_id)?.name || (form.project_id ? 'Selecciona un material' : 'Selecciona un proyecto primero')}
+              {form.purchase_order_id
+                ? `OC #${form.purchase_order_id}`
+                : (form.project_id ? 'Selecciona material/OC' : 'Selecciona un proyecto primero')}
             </Text>
             <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
           </TouchableOpacity>
@@ -364,21 +461,202 @@ export default function RegisterServiceScreen({ navigation, route }) {
           <View style={styles.dropdown}>
             <Picker
               enabled={!!form.project_id}
-              selectedValue={form.material_id}
-              onValueChange={(v) => {
-                const mat = materials.find((m) => m.id === v);
-                handleChange('material_id', v);
-                if (mat?.unit_id) handleChange('unit_id', mat.unit_id);
+              selectedValue={form.purchase_order_id ? `${form.purchase_order_id}-${form.material_id}` : ''}
+              onValueChange={(val) => {
+                if (!val) return;
+                const [orderId, materialId] = String(val).split('-');
+                const row = purchaseOptions.find((r) => String(r.order_id) === String(orderId) && String(r.material_id) === String(materialId));
+                if (!row) return;
+                handleChange('purchase_order_id', String(row.order_id));
+                handleChange('material_id', String(row.material_id));
+                handleChange('unit_id', String(row.unit_id));
+                handleChange('material_supplier_id', String(row.supplier_id));
+                setSelectedAvailability(row.available);
               }}
               style={styles.picker}
             >
-              <Picker.Item label={form.project_id ? 'Selecciona un material' : 'Selecciona un proyecto primero'} value="" />
-              {materials.map((m) => (
-                <Picker.Item key={m.id} label={m.name} value={m.id} />
+              <Picker.Item label={form.project_id ? 'Selecciona material/OC' : 'Selecciona un proyecto primero'} value="" />
+              {purchaseOptions.map((r) => (
+                <Picker.Item
+                  key={`${r.order_id}-${r.material_id}`}
+                  label={`${r.material_name} (${r.available} ${r.unit_name}) - OC ${r.order_code}`}
+                  value={`${r.order_id}-${r.material_id}`}
+                />
               ))}
             </Picker>
           </View>
         )}
+
+
+
+        <Text style={styles.fieldLabel}>Orden de transporte</Text>
+        {Platform.OS === 'ios' ? (
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => {
+              if (!form.project_id) {
+                Alert.alert('Selecciona un proyecto', 'Primero elige un proyecto para listar órdenes de transporte.');
+                return;
+              }
+              const items = transportOptions.map((r) => ({
+                label: `OT ${r.order_code} - ${r.transport_supplier_name} (${r.total_available ?? '—'} ${r.unit_name})`,
+                order_id: String(r.order_id),
+                supplier_id: String(r.transport_supplier_id),
+                pickup_location: r.pickup_location,
+              }));
+              const options = ['Cancelar', ...items.map((i) => i.label)];
+              ActionSheetIOS.showActionSheetWithOptions(
+                { title: 'Selecciona una orden de transporte', options, cancelButtonIndex: 0 },
+                async (idx) => {
+                  if (idx > 0) {
+                    const picked = items[idx - 1];
+                    handleChange('transport_order_id', picked.order_id);
+                    handleChange('transport_supplier_id', picked.supplier_id);
+
+                    // autocompletar origen desde pickup_location si existe
+                    if (picked.pickup_location && !form.origin?.trim()) {
+                      try {
+                        const { data } = await supabase
+                          .from('company_address')
+                          .select('address')
+                          .eq('id', Number(picked.pickup_location))
+                          .maybeSingle();
+                        if (data?.address) handleChange('origin', data.address);
+                      } catch {}
+                    }
+                  }
+                }
+              );
+            }}
+          >
+            <Text style={styles.dropdownText}>
+              {form.transport_order_id
+                ? `OT #${form.transport_order_id}`
+                : (form.project_id ? 'Selecciona una OT' : 'Selecciona un proyecto primero')}
+            </Text>
+            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.dropdown}>
+            <Picker
+              enabled={!!form.project_id}
+              selectedValue={form.transport_order_id}
+              onValueChange={async (v) => {
+                handleChange('transport_order_id', v);
+                const row = transportOptions.find((r) => String(r.order_id) === String(v));
+                if (row?.transport_supplier_id != null) handleChange('transport_supplier_id', String(row.transport_supplier_id));
+
+                if (row?.pickup_location && !form.origin?.trim()) {
+                  try {
+                    const { data } = await supabase
+                      .from('company_address')
+                      .select('address')
+                      .eq('id', Number(row.pickup_location))
+                      .maybeSingle();
+                    if (data?.address) handleChange('origin', data.address);
+                  } catch {}
+                }
+              }}
+              style={styles.picker}
+            >
+              <Picker.Item label={form.project_id ? 'Selecciona una OT' : 'Selecciona un proyecto primero'} value="" />
+              {transportOptions.map((r) => (
+                <Picker.Item
+                  key={String(r.order_id)}
+                  label={`OT ${r.order_code} - ${r.transport_supplier_name} (${r.total_available ?? '—'} ${r.unit_name})`}
+                  value={String(r.order_id)}
+                />
+              ))}
+            </Picker>
+          </View>
+        )}
+
+
+
+
+
+
+
+
+
+
+
+
+
+           <Text style={styles.fieldLabel}>Vehículo</Text>
+        {Platform.OS === 'ios' ? (
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => {
+              if (!form.transport_order_id) {
+                Alert.alert('Selecciona una OT', 'Primero selecciona la orden de transporte para ver los vehículos disponibles.');
+                return;
+              }
+              const items = vehicles.map((v) => ({
+                label: v.label || v.name,
+                value: v.id,
+                driver_id: v.driver_id,
+                capacity_m3: v.capacity_m3,
+              }));
+              const options = ['Cancelar', ...items.map((i) => i.label)];
+              ActionSheetIOS.showActionSheetWithOptions(
+                { title: 'Selecciona un vehículo', options, cancelButtonIndex: 0 },
+                (idx) => {
+                  if (idx > 0) {
+                    const picked = items[idx - 1];
+                    handleChange('vehicle_id', picked.value);
+                    if (picked.driver_id) handleChange('driver_id', picked.driver_id);
+                    if (picked.capacity_m3 != null && !Number.isNaN(Number(picked.capacity_m3))) handleChange('quantity', String(picked.capacity_m3));
+                  }
+                }
+              );
+            }}
+          >
+            <Text style={styles.dropdownText}>
+              {form.transport_order_id
+                ? ((vehicles.find((v) => v.id === form.vehicle_id)?.label || vehicles.find((v) => v.id === form.vehicle_id)?.name) || 'Selecciona un vehículo')
+                : 'Selecciona una OT primero'}
+            </Text>
+            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.dropdown}>
+            <Picker
+              enabled={!!form.transport_order_id}
+              selectedValue={form.vehicle_id}
+              onValueChange={(v) => {
+                handleChange('vehicle_id', v);
+                const veh = vehicles.find((x) => String(x.id) === String(v));
+                if (veh?.driver_id) handleChange('driver_id', veh.driver_id);
+                if (veh?.capacity_m3 != null && !Number.isNaN(Number(veh.capacity_m3))) handleChange('quantity', String(veh.capacity_m3));
+              }}
+              style={styles.picker}
+            >
+              <Picker.Item
+                label={form.transport_order_id ? 'Selecciona un vehículo' : 'Selecciona una OT primero'}
+                value=""
+              />
+              {form.transport_order_id && vehicles.map((v) => (
+                <Picker.Item key={v.id} label={v.label || v.name} value={v.id} />
+              ))}
+            </Picker>
+          </View>
+        )}
+
+        <Text style={styles.fieldLabel}>Conductor (ID)</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="ID de conductor"
+          keyboardType="numeric"
+          value={form.driver_id}
+          onChangeText={(v) => handleChange('driver_id', v.replace(/[^0-9]/g, ''))}
+        />
+
+
+
+
+
+        {/* Material y unidad se derivan de la selección OC/material */}
 
         <Text style={styles.fieldLabel}>Unidad</Text>
         {Platform.OS === 'ios' ? (
@@ -409,8 +687,19 @@ export default function RegisterServiceScreen({ navigation, route }) {
           </View>
         )}
 
+
+
+
+
         <Text style={styles.fieldLabel}>Cantidad</Text>
-        <TextInput style={styles.input} placeholder="Cantidad" keyboardType="numeric" value={form.quantity} onChangeText={(v) => handleChange('quantity', v.replace(/[^0-9.]/g, ''))} />
+        <TextInput
+          style={styles.input}
+          placeholder="Cantidad"
+          keyboardType="numeric"
+          value={form.quantity}
+          editable={false}
+          selectTextOnFocus={false}
+        />
 
         <Text style={styles.fieldLabel}>Origen</Text>
         <TextInput style={styles.input} placeholder="Origen (opcional)" value={form.origin} onChangeText={(v) => handleChange('origin', v)} />
@@ -423,33 +712,30 @@ export default function RegisterServiceScreen({ navigation, route }) {
           <TouchableOpacity
             style={styles.dropdown}
             onPress={() => {
-              const items = [
-                { label: 'CREATED', value: 'CREATED' },
-                { label: 'ACCEPTED', value: 'ACCEPTED' },
-                { label: 'LOADED', value: 'LOADED' },
-                { label: 'DELIVERED', value: 'DELIVERED' },
-              ];
+              const items = statuses.map((s) => ({ label: s.name, value: s.id }));
               const options = ['Cancelar', ...items.map((i) => i.label)];
               ActionSheetIOS.showActionSheetWithOptions(
                 { title: 'Estado del servicio', options, cancelButtonIndex: 0 },
-                (idx) => { if (idx > 0) handleChange('status', items[idx - 1].value); }
+                (idx) => { if (idx > 0) handleChange('status_id', items[idx - 1].value); }
               );
             }}
           >
-            <Text style={styles.dropdownText}>{form.status}</Text>
+            <Text style={styles.dropdownText}>
+              {statuses.find((s) => s.id === form.status_id)?.name || 'Selecciona un estado'}
+            </Text>
             <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
           </TouchableOpacity>
         ) : (
           <View style={styles.dropdown}>
-            <Picker selectedValue={form.status} onValueChange={(v) => handleChange('status', v)} style={styles.picker}>
-              <Picker.Item label="CREATED" value="CREATED" />
-              <Picker.Item label="ACCEPTED" value="ACCEPTED" />
-              <Picker.Item label="LOADED" value="LOADED" />
-              <Picker.Item label="DELIVERED" value="DELIVERED" />
+            <Picker selectedValue={form.status_id} onValueChange={(v) => handleChange('status_id', v)} style={styles.picker}>
+              <Picker.Item label="Selecciona un estado" value="" />
+              {statuses.map((s) => (
+                <Picker.Item key={s.id} label={s.name} value={s.id} />
+              ))}
             </Picker>
           </View>
         )}
-      </View>
+      </KeyboardAwareScrollView>
     </View>
   );
 }
@@ -466,7 +752,8 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3,
   },
   headerTitle: { color: '#fff', fontSize: 16, fontWeight: '500' },
-  container: { backgroundColor: '#fff', flex: 1, paddingHorizontal: 12, borderTopLeftRadius: 40, borderTopRightRadius: 40 },
+  container: { backgroundColor: '#fff', flex: 1, borderTopLeftRadius: 40, borderTopRightRadius: 40 },
+  containerContent: { paddingHorizontal: 12, paddingBottom: 40 },
   fieldLabel: { fontSize: 13, color: '#555', marginBottom: 4, marginTop: 12, fontWeight: '600' },
   dropdown: { borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 10, marginBottom: 12, backgroundColor: '#F3F4F6', overflow: 'hidden', position: 'relative' },
   dropdownText: { paddingVertical: 14, paddingHorizontal: 12, color: '#333', fontSize: 16 },
