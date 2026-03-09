@@ -1,11 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Alert, Pressable } from 'react-native';
 import { supabase } from './supabaseClient';
 import { MaterialIcons } from '@expo/vector-icons';
-import AdminMain from './screens/main/roles/AdminMain';
 import DriverMain from './screens/main/roles/DriverMain';
 import CoordinatorMain from './screens/main/roles/CoordinatorMain';
-import CustomerMain from './screens/main/roles/CustomerMain';
 
 import { usePermissions } from './contexts/PermissionsContext';
 
@@ -115,14 +113,26 @@ const MainScreen = ({ navigation }) => {
           <Text style={styles.bigQuestion}>¿Qué quieres hacer hoy?</Text>
 
           {/* Contenido según rol dentro del panel, incrustado */}
-          {roleName?.toLowerCase().includes('administrador') ? (
-            <AdminMain permissions={permissions} navigation={navigation} />
-          ) : roleName?.toLowerCase().includes('coordinador') ? (
+          {roleName?.toLowerCase().includes('coordinador') ? (
             <CoordinatorMain permissions={permissions} navigation={navigation} />
           ) : roleName?.toLowerCase().includes('conductor') ? (
             <DriverMain />
           ) : (
-            <CustomerMain permissions={permissions} navigation={navigation} />
+            <View style={styles.unsupportedRoleBox}>
+              <Text style={styles.unsupportedRoleTitle}>Rol no soportado</Text>
+              <Text style={styles.unsupportedRoleText}>
+                Esta app solo está habilitada para Coordinador y Conductor.
+              </Text>
+              <Pressable
+                onPress={async () => {
+                  try { await supabase.auth.signOut(); } catch (_) {}
+                  navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+                }}
+                style={styles.unsupportedRoleButton}
+              >
+                <Text style={styles.unsupportedRoleButtonText}>Cerrar sesión</Text>
+              </Pressable>
+            </View>
           )}
 
           {/* Estado de permisos (silencioso) */}
@@ -214,6 +224,22 @@ const styles = StyleSheet.create({
   userRoleText: { fontSize: 12, color: '#666' },
   companyNameText: { fontSize: 12, color: '#888' },
   bigQuestion: { fontSize: 22, fontWeight: '800', color: '#333', marginTop: 8 },
+  unsupportedRoleBox: {
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: '#F3F4F6',
+  },
+  unsupportedRoleTitle: { fontSize: 16, fontWeight: '800', color: '#111827', marginBottom: 6 },
+  unsupportedRoleText: { fontSize: 13, color: '#4B5563', marginBottom: 10 },
+  unsupportedRoleButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#6C63FF',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+  },
+  unsupportedRoleButtonText: { color: '#fff', fontWeight: '800' },
   noPermText: {
     color: '#333',
     fontSize: 15,

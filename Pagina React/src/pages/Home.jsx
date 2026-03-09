@@ -2,9 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabaseClient.js';
 import { usePermissions } from '../state/PermissionsContext.jsx';
-import AdminMain from './roles/AdminMain.jsx';
 import CoordinatorMain from './roles/CoordinatorMain.jsx';
-import CustomerMain from './roles/CustomerMain.jsx';
+import DriverMain from './roles/DriverMain.jsx';
 
 function getGreeting() {
   const h = new Date().getHours();
@@ -26,6 +25,7 @@ export default function Home() {
     const fetchFromView = async () => {
       setLoading(true);
       setError('');
+
       try {
         const { data: userRes } = await supabase.auth.getUser();
         const user = userRes?.user;
@@ -63,6 +63,7 @@ export default function Home() {
       } catch (err) {
         setError(err?.message || 'No se pudo cargar el inicio');
         setPermissions([]);
+
         if (!noRoleHandled.current && /rol activo/i.test(String(err?.message || ''))) {
           noRoleHandled.current = true;
           try {
@@ -81,41 +82,79 @@ export default function Home() {
   }, [setPermissions]);
 
   const roleKey = useMemo(() => String(roleName || '').toLowerCase(), [roleName]);
+  const greeting = useMemo(() => getGreeting(), []);
 
   return (
-    <div className="container">
-      <div className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontWeight: 900, fontSize: 16 }}>
-              {getGreeting()}, {displayName || 'Usuario'}
+    <div className="homeShell">
+      <div className="homeInner">
+        <div className="card homeHeroCard">
+          <div className="homeHeroRow">
+            <div className="homeHeroLeft">
+              <div className="homeHeroIcon" aria-hidden="true">
+                <i className="fa-solid fa-sun" aria-hidden="true" />
+              </div>
+
+              <div className="homeHeroMeta">
+                <div className="homeGreeting">
+                  {greeting}, <span className="homeName">{displayName || 'Usuario'}</span>
+                </div>
+
+                {(roleName || companyName) ? (
+                  <div className="homePills" aria-label="Rol y empresa">
+                    {roleName ? <span className="homePill homePillPrimary">{roleName}</span> : null}
+                    {companyName ? <span className="homePill">{companyName}</span> : null}
+                  </div>
+                ) : null}
+              </div>
             </div>
-            <div style={{ color: 'var(--color-muted)', marginTop: 4 }}>{roleName || ''}</div>
-            {companyName ? <div style={{ color: 'var(--color-muted)', marginTop: 2, fontSize: 13 }}>{companyName}</div> : null}
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Link className="btn" to="/account" style={{ textDecoration: 'none' }}>
-              Cuenta
-            </Link>
-            <Link className="btn btnPrimary" to="/orders/new" style={{ textDecoration: 'none' }}>
-              Registrar orden
-            </Link>
+
+            <div className="homeHeroRight">
+              <Link className="btn homeBtn" to="/account" style={{ textDecoration: 'none' }}>
+                <i className="fa-regular fa-circle-user" aria-hidden="true" />
+                Cuenta
+              </Link>
+              <Link className="btn btnPrimary homeBtn" to="/orders/new" style={{ textDecoration: 'none' }}>
+                <i className="fa-solid fa-plus" aria-hidden="true" />
+                Nueva orden
+              </Link>
+            </div>
           </div>
         </div>
 
-        <div style={{ marginTop: 12, fontWeight: 900, fontSize: 22 }}>¿Qué quieres hacer hoy?</div>
+        <div className="card homeMainCard">
+          <div className="homeSectionHead">
+            <div className="homeTitle">¿Qué quieres hacer hoy?</div>
+            <div className="homeSubtitle">Accede rápidamente a tus módulos</div>
+          </div>
 
-        {loading ? (
-          <div style={{ marginTop: 10, color: 'var(--color-muted)' }}>Cargando permisos…</div>
-        ) : error ? (
-          <div style={{ marginTop: 10, color: '#B91C1C', fontWeight: 700, textAlign: 'center' }}>{error}</div>
-        ) : roleKey.includes('administrador') ? (
-          <AdminMain permissions={permissions} />
-        ) : roleKey.includes('coordinador') ? (
-          <CoordinatorMain permissions={permissions} />
-        ) : (
-          <CustomerMain permissions={permissions} />
-        )}
+          {loading ? (
+            <div className="homeState">Cargando permisos…</div>
+          ) : error ? (
+            <div className="homeError">{error}</div>
+          ) : roleKey.includes('coordinador') ? (
+            <CoordinatorMain permissions={permissions} />
+          ) : roleKey.includes('conductor') ? (
+            <DriverMain permissions={permissions} />
+          ) : (
+            <div className="homeError">
+              <div style={{ fontWeight: 800, marginBottom: 6 }}>Rol no soportado</div>
+              <div style={{ marginBottom: 10 }}>Esta app solo está habilitada para Coordinador y Conductor.</div>
+              <button
+                className="btn btnPrimary"
+                onClick={async () => {
+                  try {
+                    await supabase.auth.signOut();
+                  } catch {
+                    // noop
+                  }
+                  window.location.href = '/login';
+                }}
+              >
+                Cerrar sesión
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
