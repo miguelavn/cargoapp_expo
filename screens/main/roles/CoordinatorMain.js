@@ -31,26 +31,16 @@ function QuickAction({ icon, label, color = '#6C63FF', onPress }) {
 }
 
 export default function CoordinatorMain({ permissions = [], navigation }) {
-  const showOrders = useMemo(() => (
-    hasPerm(permissions, 'view_all_orders') ||
-    hasPerm(permissions, 'view_all_orders_from_my_company')
-  ), [permissions]);
-
   const showServices = useMemo(() => (
-    hasPerm(permissions, 'create_new_service_for_my_company')
+    hasPerm(permissions, 'manage_services') ||
+    hasPerm(permissions, 'create_new_service_for_my_company') ||
+    hasPerm(permissions, 'view_services_for_my_projects_in_my_company')
   ), [permissions]);
 
   return (
     <>
       <View style={{ height: 120, backgroundColor: '#FFEDEB', borderRadius: 12, marginBottom: 12 }} />
       <View style={{ flexDirection: 'row', marginHorizontal: -6, flexWrap: 'wrap' }}>
-        {showOrders && (
-          <QuickAction
-            icon="file-document-edit"
-            label="Órdenes"
-            onPress={() => navigation?.navigate?.('OrdersList', { permissions })}
-          />
-        )}
         {showServices && (
           <QuickAction
             icon="tools"
@@ -58,7 +48,7 @@ export default function CoordinatorMain({ permissions = [], navigation }) {
             onPress={() => navigation?.navigate?.('ServicesList', { permissions })}
           />
         )}
-        {(!showOrders && !showServices) && (
+        {(!showServices) && (
           <View style={{ flex: 1, margin: 6 }}>
             <Text style={{ color: '#666', textAlign: 'center', padding: 12 }}>Sin accesos disponibles</Text>
           </View>

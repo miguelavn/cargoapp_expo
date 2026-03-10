@@ -1,15 +1,20 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import ServicesListScreen from './ServicesListScreen';
+import { usePermissions } from '../../../contexts/PermissionsContext';
 
-export default function ServicesScreen() {
+export default function ServicesScreen({ navigation, route }) {
+  const { permissions } = usePermissions();
   return (
-    <View style={styles.container}>
-      <Text style={styles.text}>Servicios de viajes (próximamente)</Text>
-    </View>
+    <ServicesListScreen
+      navigation={navigation}
+      route={{
+        ...(route || {}),
+        params: {
+          ...(route?.params || {}),
+          permissions,
+          hideBack: true,
+        },
+      }}
+    />
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  text: { color: '#333' },
-});

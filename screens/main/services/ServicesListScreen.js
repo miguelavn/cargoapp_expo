@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, ActionSheetIOS } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
 import { COLORS } from '../../../theme/colors';
+import { usePermissions } from '../../../contexts/PermissionsContext';
 
 function hasPerm(perms = [], needle) {
   const n = String(needle).toLowerCase();
@@ -13,24 +14,56 @@ function hasPerm(perms = [], needle) {
 }
 
 export default function ServicesListScreen({ navigation, route }) {
-  const permissions = route?.params?.permissions || [];
-  const canCreate = hasPerm(permissions, 'create_new_service_for_my_company');
+  const { permissions: ctxPerms } = usePermissions();
+  const permissions = route?.params?.permissions?.length ? route.params.permissions : (ctxPerms || []);
+
+  const canCreate = hasPerm(permissions, 'manage_services') || hasPerm(permissions, 'create_new_service_for_my_company');
+  const canUpdate = hasPerm(permissions, 'manage_services') || hasPerm(permissions, 'update_all_services') || hasPerm(permissions, 'update_services_from_my_company');
+
+  const hideBack = !!route?.params?.hideBack;
 
   const insets = useSafeAreaInsets();
   const [projects, setProjects] = useState([]);
   const [projectId, setProjectId] = useState(route?.params?.projectId ? String(route.params.projectId) : '');
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [cancellingId, setCancellingId] = useState(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const { data: pjs } = await supabase.from('projects').select('project_id, name, status').eq('status', true).order('name');
-        setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
+        try {
+          const res = await callEdgeFunction('list-projects', { method: 'GET', query: { limit: 1000 } });
+          const rows = Array.isArray(res?.projects) ? res.projects : (Array.isArray(res?.data) ? res.data : []);
+          const mapped = rows.map((p) => ({
+            id: String(p.project_id ?? p.id),
+            name: String(p.project_name ?? p.name ?? ''),
+            status: p.status,
+          }));
+          setProjects(mapped.filter((p) => p.id && p.name && p.status !== false));
+        } catch {
+          const { data: pjs } = await supabase.from('projects').select('project_id, name, status').eq('status', true).order('name');
+          setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
+        }
       } catch {}
       await load();
     })();
   }, []);
+
+  // Web parity: refrescar lista con realtime
+  useEffect(() => {
+    const channel = supabase
+      .channel('services-list-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, () => {
+        load();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   // Recarga cuando cambie el filtro de proyecto o se regrese con refresh
   useEffect(() => {
@@ -54,6 +87,8 @@ export default function ServicesListScreen({ navigation, route }) {
           created_at: it.created_at ?? it.date ?? null,
           origin: it.origin ?? null,
           destination: it.destination ?? null,
+          status_name: it.status_name ?? it.status ?? null,
+          status_id: it.status_id ?? null,
           // Se mantiene por compatibilidad (p.ej. al abrir edición)
           order_id: it.order_id ?? it.orderId ?? null,
         }));
@@ -73,6 +108,8 @@ export default function ServicesListScreen({ navigation, route }) {
           project_name: null,
           origin: it.origin ?? null,
           destination: it.destination ?? null,
+          status_name: null,
+          status_id: null,
         }));
         setServices(norm);
       }
@@ -83,15 +120,35 @@ export default function ServicesListScreen({ navigation, route }) {
     }
   };
 
+  const cancelService = async (serviceId) => {
+    try {
+      setCancellingId(serviceId);
+      await callEdgeFunction('update-service', {
+        method: 'POST',
+        body: { service_id: Number(serviceId), cancel: true },
+      });
+      Alert.alert('Éxito', 'Servicio cancelado');
+      await load();
+    } catch (e) {
+      Alert.alert('Error', e.message || 'No se pudo cancelar el servicio');
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
   const headerTop = Platform.OS === 'ios' ? insets.top : insets.top + 8;
 
   return (
     <View style={styles.screen}>
       <View style={[styles.headerArea, { paddingTop: headerTop }]}> 
         <View style={styles.topBarRow}>
-          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton} activeOpacity={0.7}>
-            <MaterialIcons name="arrow-back" size={20} color={COLORS.dark} />
-          </TouchableOpacity>
+          {!hideBack ? (
+            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton} activeOpacity={0.7}>
+              <MaterialIcons name="arrow-back" size={20} color={COLORS.dark} />
+            </TouchableOpacity>
+          ) : (
+            <View style={{ width: 40, height: 40 }} />
+          )}
           <Text style={[styles.headerTitle, { flex: 1 }]}>Servicios</Text>
           {canCreate && (
             <TouchableOpacity onPress={() => navigation.navigate('RegisterService', { projectId })} style={styles.smallBtn}>
@@ -142,11 +199,41 @@ export default function ServicesListScreen({ navigation, route }) {
           data={services}
           keyExtractor={(it) => String(it.service_id)}
           renderItem={({ item }) => (
-            <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId })}>
+            <TouchableOpacity
+              style={styles.card}
+              onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId })}
+              onLongPress={() => {
+                const statusUpper = String(item.status_name || '').toUpperCase();
+                const canCancel = canUpdate && (!item.status_name || statusUpper === 'CREATED');
+
+                const buttons = [
+                  { text: 'Cerrar', style: 'cancel' },
+                  { text: 'Editar', onPress: () => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId }) },
+                ];
+                if (canCancel) {
+                  buttons.push({
+                    text: cancellingId === item.service_id ? 'Cancelando…' : 'Cancelar servicio',
+                    style: 'destructive',
+                    onPress: () => {
+                      Alert.alert('Confirmar', '¿Cancelar este servicio?', [
+                        { text: 'No', style: 'cancel' },
+                        { text: 'Sí, cancelar', style: 'destructive', onPress: () => cancelService(item.service_id) },
+                      ]);
+                    },
+                  });
+                }
+
+                Alert.alert('Acciones', `Servicio #${item.service_id}`, buttons);
+              }}
+              delayLongPress={250}
+            >
               <Text style={styles.cardTitle} numberOfLines={2}>{item.project_name || 'Proyecto'}</Text>
               <Text style={styles.cardMeta}>Fecha: {item.created_at ? String(item.created_at).slice(0, 10) : '—'}</Text>
               <Text style={styles.cardMeta}>Origen: {item.origin || '—'}</Text>
               <Text style={styles.cardMeta}>Destino: {item.destination || '—'}</Text>
+              {!!item.status_name && (
+                <Text style={styles.cardMeta}>Estado: {String(item.status_name)}</Text>
+              )}
             </TouchableOpacity>
           )}
           ItemSeparatorComponent={() => <View style={{ height: 8 }} />}

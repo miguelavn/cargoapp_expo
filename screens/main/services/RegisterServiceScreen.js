@@ -19,12 +19,14 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const [units, setUnits] = useState([]);
   const [purchaseOptions, setPurchaseOptions] = useState([]); // filas de project_materials_availability
   const [transportOptions, setTransportOptions] = useState([]); // filas de transport_orders_availability
-  const [statuses, setStatuses] = useState([]); // filas de service_status
+  const [driverName, setDriverName] = useState('');
+  const [originAddress, setOriginAddress] = useState('');
+  const [myCompanyId, setMyCompanyId] = useState(null);
   
 
   const [selectedAvailability, setSelectedAvailability] = useState(null); // numeric
 
-  // Esquema real de services (según DB): purchase_order_id, transport_order_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, material_supplier_id, transport_supplier_id, project_id, status_id
+  // Esquema real de services (según DB): purchase_order_id, transport_order_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, material_supplier_id, transport_supplier_id, project_id
   const [form, setForm] = useState({
     purchase_order_id: '',
     transport_order_id: '',
@@ -38,25 +40,98 @@ export default function RegisterServiceScreen({ navigation, route }) {
     destination: '',
     material_supplier_id: '',
     transport_supplier_id: '',
-    status_id: '',
   });
 
   const handleChange = (k, v) => setForm((s) => ({ ...s, [k]: v }));
 
   const prevTransportSupplierRef = useRef('');
 
+  const formRef = useRef(form);
+  useEffect(() => {
+    formRef.current = form;
+  }, [form]);
+
+  const loadMyCompanyId = async () => {
+    try {
+      if (myCompanyId != null) return myCompanyId;
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const authId = sessionRes?.session?.user?.id;
+      if (!authId) return null;
+      const { data } = await supabase.from('app_users').select('company_id').eq('auth_id', authId).maybeSingle();
+      const cid = data?.company_id ?? null;
+      setMyCompanyId(cid);
+      return cid;
+    } catch {
+      return null;
+    }
+  };
+
+  const loadDriverByVehicle = async (vehicleId) => {
+    try {
+      if (!vehicleId) {
+        setDriverName('');
+        return;
+      }
+      const res = await callEdgeFunction('get-driver-by-vehicle', {
+        method: 'GET',
+        query: { vehicle_id: Number(vehicleId) },
+      });
+      setDriverName(String(res?.driver?.name || ''));
+    } catch {
+      setDriverName('');
+    }
+  };
+
   useEffect(() => {
     (async () => {
       try {
-        const { data: pjs } = await supabase.from('projects').select('project_id, name, status').eq('status', true).order('name');
-        setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
+        // Web parity: intenta listar proyectos vía edge (filtra según permisos/RLS)
+        try {
+          const res = await callEdgeFunction('list-projects', { method: 'GET', query: { limit: 1000 } });
+          const rows = Array.isArray(res?.projects) ? res.projects : (Array.isArray(res?.data) ? res.data : []);
+          const mapped = rows.map((p) => ({
+            id: String(p.project_id ?? p.id),
+            name: String(p.project_name ?? p.name ?? ''),
+            status: p.status,
+          }));
+          setProjects(mapped.filter((p) => p.id && p.name && p.status !== false));
+        } catch {
+          const { data: pjs } = await supabase.from('projects').select('project_id, name, status').eq('status', true).order('name');
+          setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
+        }
       } catch {}
       // No cargar vehículos hasta seleccionar una OT
       setVehicles([]);
       await loadUnits();
-      await loadStatuses();
       if (serviceId) await loadService(serviceId);
     })();
+  }, []);
+
+  // Realtime (como web): refrescar disponibilidad y vehículos cuando cambian órdenes/detalles/vehículos
+  useEffect(() => {
+    const refresh = async () => {
+      const cur = formRef.current;
+      if (cur?.project_id) {
+        await fetchPurchaseOptions(cur.project_id);
+        if (cur?.material_id) await fetchTransportOptions(cur.project_id, cur.material_id);
+      }
+      if (cur?.transport_supplier_id) {
+        await loadVehicles(cur.transport_supplier_id);
+      }
+    };
+
+    const channel = supabase
+      .channel('register-service-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => { refresh(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_details' }, () => { refresh(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'vehicles' }, () => { refresh(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_vehicles' }, () => { refresh(); })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Recargar vehículos cuando cambie el supplier de la orden de transporte
@@ -67,6 +142,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
 
     // Si cambia el supplier, resetear vehículo/conductor
     setForm((s) => ({ ...s, vehicle_id: '', driver_id: '' }));
+    setDriverName('');
 
     // Si aún no hay OT/supplier seleccionado, no mostrar vehículos
     if (!nextSupplierId) {
@@ -77,6 +153,47 @@ export default function RegisterServiceScreen({ navigation, route }) {
     loadVehicles(nextSupplierId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.transport_supplier_id]);
+
+  // Resolver origen (id o texto) a dirección para mostrar (modo web)
+  useEffect(() => {
+    (async () => {
+      const raw = String(form.origin || '').trim();
+      if (!raw) {
+        setOriginAddress('');
+        return;
+      }
+      const asNum = Number(raw);
+      if (!Number.isNaN(asNum) && raw !== '') {
+        try {
+          const { data } = await supabase.from('company_address').select('address').eq('id', asNum).maybeSingle();
+          setOriginAddress(String(data?.address || ''));
+          return;
+        } catch {
+          // fallback a mostrar el valor
+        }
+      }
+      setOriginAddress(raw);
+    })();
+  }, [form.origin]);
+
+  // Sincronizar conductor (ID) desde vehículo y resolver nombre (Edge Function)
+  useEffect(() => {
+    (async () => {
+      if (!form.vehicle_id) {
+        if (form.driver_id) setForm((s) => ({ ...s, driver_id: '' }));
+        setDriverName('');
+        return;
+      }
+
+      const veh = vehicles.find((v) => String(v.id) === String(form.vehicle_id));
+      if (veh?.driver_id && String(form.driver_id) !== String(veh.driver_id)) {
+        setForm((s) => ({ ...s, driver_id: String(veh.driver_id) }));
+      }
+
+      await loadDriverByVehicle(form.vehicle_id);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.vehicle_id, vehicles]);
 
   // La cantidad siempre se deriva del vehículo seleccionado (capacidad m3)
   useEffect(() => {
@@ -95,10 +212,11 @@ export default function RegisterServiceScreen({ navigation, route }) {
     setForm((s) => (String(s.quantity) === nextQty ? s : { ...s, quantity: nextQty }));
   }, [form.vehicle_id, vehicles]);
 
-  // Cargar disponibilidad cuando cambia el proyecto
+  // Cargar disponibilidad cuando cambia el proyecto (OC/material). Las OT se cargan cuando haya material seleccionado.
   useEffect(() => {
     (async () => {
-      await loadAvailabilityForProject(form.project_id);
+      await fetchPurchaseOptions(form.project_id);
+      setTransportOptions([]);
 
       // Al cambiar de proyecto, resetear selecciones dependientes
       setSelectedAvailability(null);
@@ -110,44 +228,92 @@ export default function RegisterServiceScreen({ navigation, route }) {
         unit_id: '',
         material_supplier_id: '',
         transport_supplier_id: '',
+        origin: '',
       }));
+      setOriginAddress('');
+      setVehicles([]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.project_id]);
 
+  // Cargar OT (transport_orders_availability) cuando cambie el material seleccionado (como web)
+  useEffect(() => {
+    (async () => {
+      if (!form.project_id || !form.material_id) {
+        setTransportOptions([]);
+        return;
+      }
+      await fetchTransportOptions(form.project_id, form.material_id);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.material_id, form.project_id]);
+
   const loadVehicles = async (transportSupplierId = '') => {
     try {
-      // Esquema: vehicles(vehicle_id, plate, is_active, is_available, transport_supplier_id, driver_id)
-      let qb = supabase
-        .from('vehicles')
-        .select('vehicle_id, plate, model, capacity_m3, is_active, is_available, transport_supplier_id, driver_id')
-        .eq('is_active', true)
-        .eq('is_available', true);
+      const companyId = await loadMyCompanyId();
 
-      // Si ya seleccionaron OT, filtrar por supplier de transporte
+      const { data } = await supabase.from('vehicles').select('*');
+      let list = Array.isArray(data) ? data : [];
+
+      // Filtros base (solo si existen las columnas)
+      list = list.filter((v) => {
+        if (v.is_active === false) return false;
+        if (v.is_available === false) return false;
+        if (Object.prototype.hasOwnProperty.call(v, 'online') && v.online === false) return false;
+        if (Object.prototype.hasOwnProperty.call(v, 'current_service_id') && v.current_service_id != null) return false;
+        if (companyId != null && Object.prototype.hasOwnProperty.call(v, 'created_by_company') && v.created_by_company != null) {
+          if (Number(v.created_by_company) !== Number(companyId)) return false;
+        }
+        return true;
+      });
+
+      // Filtrar por supplier de transporte
       if (transportSupplierId) {
         const sid = Number(transportSupplierId);
-        if (!Number.isNaN(sid)) qb = qb.eq('transport_supplier_id', sid);
+        if (!Number.isNaN(sid)) {
+          list = list.filter((v) => Number(v.transport_supplier_id) === sid);
+        }
       }
 
-      const { data } = await qb.order('plate');
-      setVehicles((data || []).map((v) => ({
-        id: String(v.vehicle_id),
-        name: v.plate,
-        label: [String(v.model || '').trim(), v.capacity_m3 != null ? `${v.capacity_m3} m³` : '', v.plate]
-          .filter((x) => String(x || '').trim())
-          .join(' - '),
-        capacity_m3: v.capacity_m3,
-        driver_id: v.driver_id != null ? String(v.driver_id) : '',
-      })));
+      // Filtrar por vehículos asignados al proyecto (si existen)
+      if (formRef.current?.project_id) {
+        try {
+          const { data: pv } = await supabase
+            .from('project_vehicles')
+            .select('vehicle_id')
+            .eq('project_id', Number(formRef.current.project_id));
+          const ids = (pv || []).map((r) => Number(r.vehicle_id)).filter((x) => !Number.isNaN(x));
+          if (ids.length > 0) {
+            const idSet = new Set(ids);
+            list = list.filter((v) => idSet.has(Number(v.vehicle_id ?? v.id)));
+          }
+        } catch {}
+      }
+
+      const mapped = list
+        .map((v) => {
+          const vid = v.vehicle_id ?? v.id;
+          return {
+            id: String(vid),
+            name: String(v.plate || ''),
+            label: [String(v.model || '').trim(), v.capacity_m3 != null ? `${v.capacity_m3} m³` : '', String(v.plate || '')]
+              .filter((x) => String(x || '').trim())
+              .join(' - '),
+            capacity_m3: v.capacity_m3,
+            driver_id: v.driver_id != null ? String(v.driver_id) : '',
+          };
+        })
+        .filter((v) => v.id && v.name);
+
+      mapped.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      setVehicles(mapped);
     } catch (e) {}
   };
 
-  const loadAvailabilityForProject = async (projectId) => {
+  const fetchPurchaseOptions = async (projectId) => {
     try {
       if (!projectId) {
         setPurchaseOptions([]);
-        setTransportOptions([]);
         return;
       }
 
@@ -157,16 +323,33 @@ export default function RegisterServiceScreen({ navigation, route }) {
         .select('project_id, order_id, order_code, material_id, material_name, unit_id, unit_name, available, supplier_id, supplier_name')
         .eq('project_id', Number(projectId));
       setPurchaseOptions(Array.isArray(purchRows) ? purchRows : []);
-
-      // Órdenes de transporte + disponibilidad
-      const { data: trRows } = await supabase
-        .from('transport_orders_availability')
-        .select('project_id, order_id, order_code, unit_id, unit_name, total_available, quantity_required, transport_supplier_id, transport_supplier_name, pickup_location')
-        .eq('project_id', Number(projectId));
-      setTransportOptions(Array.isArray(trRows) ? trRows : []);
     } catch (e) {
       // En caso de fallo, dejar vacío
       setPurchaseOptions([]);
+    }
+  };
+
+  const fetchTransportOptions = async (projectId, materialId) => {
+    try {
+      if (!projectId || !materialId) {
+        setTransportOptions([]);
+        return;
+      }
+      const { data: trRows } = await supabase
+        .from('transport_orders_availability')
+        .select('*')
+        .eq('project_id', Number(projectId));
+
+      let rows = Array.isArray(trRows) ? trRows : [];
+      // Filtros como web, solo si existen esas columnas
+      rows = rows.filter((r) => {
+        if (Object.prototype.hasOwnProperty.call(r, 'material_id') && String(r.material_id) !== String(materialId)) return false;
+        if (Object.prototype.hasOwnProperty.call(r, 'is_active') && r.is_active === false) return false;
+        return true;
+      });
+
+      setTransportOptions(rows);
+    } catch {
       setTransportOptions([]);
     }
   };
@@ -175,24 +358,6 @@ export default function RegisterServiceScreen({ navigation, route }) {
     try {
       const { data } = await supabase.from('measurement_units').select('id, name');
       setUnits((data || []).map((u) => ({ id: String(u.id), name: u.name })));
-    } catch {}
-  };
-
-  const loadStatuses = async () => {
-    try {
-      const { data } = await supabase
-        .from('service_status')
-        .select('id, status_name')
-        .order('id', { ascending: true });
-      const list = (data || []).map((s) => ({ id: String(s.id), name: s.status_name }));
-      setStatuses(list);
-
-      // Default a CREATED si existe
-      setForm((prev) => {
-        if (prev.status_id) return prev;
-        const created = list.find((x) => String(x.name || '').toLowerCase() === 'created');
-        return { ...prev, status_id: created?.id || prev.status_id };
-      });
     } catch {}
   };
 
@@ -215,12 +380,11 @@ export default function RegisterServiceScreen({ navigation, route }) {
           destination: s.destination || '',
           material_supplier_id: s.material_supplier_id ? String(s.material_supplier_id) : '',
           transport_supplier_id: s.transport_supplier_id ? String(s.transport_supplier_id) : '',
-          status_id: s.status_id ? String(s.status_id) : '',
         });
       } catch {
         const { data } = await supabase
           .from('services')
-          .select('service_id, purchase_order_id, transport_order_id, project_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, material_supplier_id, transport_supplier_id, status_id')
+          .select('service_id, purchase_order_id, transport_order_id, project_id, vehicle_id, driver_id, material_id, unit_id, quantity, origin, destination, material_supplier_id, transport_supplier_id')
           .eq('service_id', id)
           .maybeSingle();
         if (data) setForm({
@@ -236,7 +400,6 @@ export default function RegisterServiceScreen({ navigation, route }) {
           destination: data.destination || '',
           material_supplier_id: data.material_supplier_id ? String(data.material_supplier_id) : '',
           transport_supplier_id: data.transport_supplier_id ? String(data.transport_supplier_id) : '',
-          status_id: data.status_id ? String(data.status_id) : '',
         });
       }
     } catch (e) {
@@ -250,7 +413,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
     if (!form.purchase_order_id) errs.purchase_order_id = 'Selecciona la orden de compra';
     if (!form.transport_order_id) errs.transport_order_id = 'Selecciona la orden de transporte';
     if (!form.vehicle_id) errs.vehicle_id = 'Selecciona un vehículo';
-    if (!form.driver_id) errs.driver_id = 'Selecciona un conductor (o un vehículo con conductor)';
+    if (!form.driver_id) errs.driver_id = 'El vehículo no tiene conductor asignado';
     if (!form.material_id) errs.material_id = 'Selecciona un material';
     if (!form.unit_id) errs.unit_id = 'Selecciona una unidad';
     if (!form.quantity || isNaN(Number(form.quantity)) || Number(form.quantity) <= 0) errs.quantity = 'Cantidad requerida (capacidad del vehículo)';
@@ -265,6 +428,8 @@ export default function RegisterServiceScreen({ navigation, route }) {
       if (serviceId) {
         // update
         try {
+          const originNum = Number(form.origin);
+          const originValue = !Number.isNaN(originNum) && String(form.origin || '').trim() ? originNum : (form.origin?.trim() || null);
           await callEdgeFunction('update-service', {
             method: 'POST',
             body: {
@@ -279,11 +444,10 @@ export default function RegisterServiceScreen({ navigation, route }) {
               material_id: Number(form.material_id),
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
-              origin: form.origin?.trim() || null,
+              origin: originValue,
               destination: form.destination.trim(),
               material_supplier_id: Number(form.material_supplier_id),
               transport_supplier_id: Number(form.transport_supplier_id),
-              status_id: form.status_id ? Number(form.status_id) : null,
             },
           });
         } catch (e) {
@@ -303,7 +467,6 @@ export default function RegisterServiceScreen({ navigation, route }) {
               destination: form.destination.trim(),
               material_supplier_id: Number(form.material_supplier_id),
               transport_supplier_id: Number(form.transport_supplier_id),
-              status_id: form.status_id ? Number(form.status_id) : null,
             })
             .eq('service_id', serviceId);
           if (error) throw error;
@@ -314,6 +477,8 @@ export default function RegisterServiceScreen({ navigation, route }) {
       } else {
         // create
         try {
+          const originNum = Number(form.origin);
+          const originValue = !Number.isNaN(originNum) && String(form.origin || '').trim() ? originNum : (form.origin?.trim() || null);
           await callEdgeFunction('create-service', {
             method: 'POST',
             body: {
@@ -327,11 +492,10 @@ export default function RegisterServiceScreen({ navigation, route }) {
               material_id: Number(form.material_id),
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
-              origin: form.origin?.trim() || null,
+              origin: originValue,
               destination: form.destination.trim(),
               material_supplier_id: Number(form.material_supplier_id),
               transport_supplier_id: Number(form.transport_supplier_id),
-              status_id: form.status_id ? Number(form.status_id) : null,
             },
           });
         } catch (e) {
@@ -348,7 +512,6 @@ export default function RegisterServiceScreen({ navigation, route }) {
             destination: form.destination.trim(),
             material_supplier_id: Number(form.material_supplier_id),
             transport_supplier_id: Number(form.transport_supplier_id),
-            status_id: form.status_id ? Number(form.status_id) : null,
           });
           if (error) throw error;
         }
@@ -472,6 +635,15 @@ export default function RegisterServiceScreen({ navigation, route }) {
                 handleChange('unit_id', String(row.unit_id));
                 handleChange('material_supplier_id', String(row.supplier_id));
                 setSelectedAvailability(row.available);
+
+                // Al cambiar material, limpiar transporte/vehículo/origen (como web)
+                handleChange('transport_order_id', '');
+                handleChange('transport_supplier_id', '');
+                handleChange('vehicle_id', '');
+                handleChange('driver_id', '');
+                handleChange('origin', '');
+                setOriginAddress('');
+                setVehicles([]);
               }}
               style={styles.picker}
             >
@@ -511,17 +683,26 @@ export default function RegisterServiceScreen({ navigation, route }) {
                   if (idx > 0) {
                     const picked = items[idx - 1];
                     handleChange('transport_order_id', picked.order_id);
+
+                    // Al cambiar OT, limpiar vehículo/conductor para evitar inconsistencias
+                    handleChange('vehicle_id', '');
+                    handleChange('driver_id', '');
+                    setDriverName('');
+
+                    // origen estilo web: guardar el id de pickup_location y mostrar la dirección
+                    handleChange('origin', picked.pickup_location != null ? String(picked.pickup_location) : '');
+
                     handleChange('transport_supplier_id', picked.supplier_id);
 
                     // autocompletar origen desde pickup_location si existe
-                    if (picked.pickup_location && !form.origin?.trim()) {
+                    if (picked.pickup_location) {
                       try {
                         const { data } = await supabase
                           .from('company_address')
                           .select('address')
                           .eq('id', Number(picked.pickup_location))
                           .maybeSingle();
-                        if (data?.address) handleChange('origin', data.address);
+                        if (data?.address) setOriginAddress(data.address);
                       } catch {}
                     }
                   }
@@ -543,17 +724,27 @@ export default function RegisterServiceScreen({ navigation, route }) {
               selectedValue={form.transport_order_id}
               onValueChange={async (v) => {
                 handleChange('transport_order_id', v);
+
+                // Al cambiar OT, limpiar vehículo/conductor para evitar inconsistencias
+                handleChange('vehicle_id', '');
+                handleChange('driver_id', '');
+                setDriverName('');
+
                 const row = transportOptions.find((r) => String(r.order_id) === String(v));
                 if (row?.transport_supplier_id != null) handleChange('transport_supplier_id', String(row.transport_supplier_id));
 
-                if (row?.pickup_location && !form.origin?.trim()) {
+                // origen estilo web
+                handleChange('origin', row?.pickup_location != null ? String(row.pickup_location) : '');
+                setOriginAddress('');
+
+                if (row?.pickup_location) {
                   try {
                     const { data } = await supabase
                       .from('company_address')
                       .select('address')
                       .eq('id', Number(row.pickup_location))
                       .maybeSingle();
-                    if (data?.address) handleChange('origin', data.address);
+                    if (data?.address) setOriginAddress(data.address);
                   } catch {}
                 }
               }}
@@ -643,13 +834,17 @@ export default function RegisterServiceScreen({ navigation, route }) {
           </View>
         )}
 
-        <Text style={styles.fieldLabel}>Conductor (ID)</Text>
+        <Text style={styles.fieldLabel}>Conductor</Text>
         <TextInput
           style={styles.input}
-          placeholder="ID de conductor"
-          keyboardType="numeric"
-          value={form.driver_id}
-          onChangeText={(v) => handleChange('driver_id', v.replace(/[^0-9]/g, ''))}
+          placeholder="Conductor"
+          value={
+            !form.vehicle_id
+              ? 'Seleccione un vehículo'
+              : (driverName || (form.driver_id ? `Conductor #${form.driver_id}` : ''))
+          }
+          editable={false}
+          selectTextOnFocus={false}
         />
 
 
@@ -702,39 +897,17 @@ export default function RegisterServiceScreen({ navigation, route }) {
         />
 
         <Text style={styles.fieldLabel}>Origen</Text>
-        <TextInput style={styles.input} placeholder="Origen (opcional)" value={form.origin} onChangeText={(v) => handleChange('origin', v)} />
+        <TextInput
+          style={styles.input}
+          placeholder="Se asigna al seleccionar OT"
+          value={originAddress || (form.origin ? `Dirección #${form.origin}` : '')}
+          editable={false}
+          selectTextOnFocus={false}
+        />
 
         <Text style={styles.fieldLabel}>Destino</Text>
         <TextInput style={styles.input} placeholder="Destino" value={form.destination} onChangeText={(v) => handleChange('destination', v)} />
 
-        <Text style={styles.fieldLabel}>Estado</Text>
-        {Platform.OS === 'ios' ? (
-          <TouchableOpacity
-            style={styles.dropdown}
-            onPress={() => {
-              const items = statuses.map((s) => ({ label: s.name, value: s.id }));
-              const options = ['Cancelar', ...items.map((i) => i.label)];
-              ActionSheetIOS.showActionSheetWithOptions(
-                { title: 'Estado del servicio', options, cancelButtonIndex: 0 },
-                (idx) => { if (idx > 0) handleChange('status_id', items[idx - 1].value); }
-              );
-            }}
-          >
-            <Text style={styles.dropdownText}>
-              {statuses.find((s) => s.id === form.status_id)?.name || 'Selecciona un estado'}
-            </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.dropdown}>
-            <Picker selectedValue={form.status_id} onValueChange={(v) => handleChange('status_id', v)} style={styles.picker}>
-              <Picker.Item label="Selecciona un estado" value="" />
-              {statuses.map((s) => (
-                <Picker.Item key={s.id} label={s.name} value={s.id} />
-              ))}
-            </Picker>
-          </View>
-        )}
       </KeyboardAwareScrollView>
     </View>
   );
