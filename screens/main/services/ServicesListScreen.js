@@ -1,7 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, ActionSheetIOS } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, useWindowDimensions, TextInput, Switch, Modal, Pressable } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { Picker } from '@react-native-picker/picker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
@@ -13,9 +12,57 @@ function hasPerm(perms = [], needle) {
   return (perms || []).some((p) => String(p.permission_name || p).toLowerCase() === n);
 }
 
+function normalizeProjectStatus(status) {
+  if (status === false || status === 0 || status === '0') return false;
+  if (typeof status === 'string' && status.toLowerCase() === 'false') return false;
+  return true;
+}
+
+const TERMINAL_STATUSES = ['DELIVERED', 'CANCELED'];
+
+function isServiceActive(statusName) {
+  return !TERMINAL_STATUSES.includes(String(statusName || '').toUpperCase());
+}
+
+function statusVariant(statusName) {
+  const k = String(statusName || '').toLowerCase().replace(/\s+/g, '_');
+  if (['canceled', 'cancelled', 'cancelado'].includes(k)) return 'cancelled';
+  if (['delivered', 'completed', 'entregado'].includes(k)) return 'completed';
+  if (['accepted', 'loaded', 'in_progress', 'en_proceso'].includes(k)) return 'in_progress';
+  if (['created'].includes(k)) return 'created';
+  return 'default';
+}
+
+function formatDateEs(dateStr) {
+  if (!dateStr) return '—';
+  try {
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return String(dateStr).slice(0, 10);
+    return new Intl.DateTimeFormat('es-CO', { day: '2-digit', month: 'short', year: 'numeric' }).format(d);
+  } catch {
+    return String(dateStr).slice(0, 10);
+  }
+}
+
 export default function ServicesListScreen({ navigation, route }) {
+  const { width: screenWidth } = useWindowDimensions();
+
   const { permissions: ctxPerms } = usePermissions();
   const permissions = route?.params?.permissions?.length ? route.params.permissions : (ctxPerms || []);
+
+  const statLabelStyle = useMemo(() => {
+    if (screenWidth <= 350) return { fontSize: 7 };
+    if (screenWidth <= 390) return { fontSize: 8 };
+    return { fontSize: 9 };
+  }, [screenWidth]);
+
+  const todayKey = useMemo(() => {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }, []);
 
   const canCreate = hasPerm(permissions, 'manage_services') || hasPerm(permissions, 'create_new_service_for_my_company');
   const canUpdate = hasPerm(permissions, 'manage_services') || hasPerm(permissions, 'update_all_services') || hasPerm(permissions, 'update_services_from_my_company');
@@ -26,8 +73,122 @@ export default function ServicesListScreen({ navigation, route }) {
   const [projects, setProjects] = useState([]);
   const [projectId, setProjectId] = useState(route?.params?.projectId ? String(route.params.projectId) : '');
   const [services, setServices] = useState([]);
+  const [statusTab, setStatusTab] = useState('en_proceso');
   const [loading, setLoading] = useState(false);
   const [cancellingId, setCancellingId] = useState(null);
+
+  const [searchText, setSearchText] = useState('');
+  const [onlyToday, setOnlyToday] = useState(false);
+
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [projectStatusFilter, setProjectStatusFilter] = useState('active'); // 'all' | 'active' | 'inactive'
+
+  const [projectStats, setProjectStats] = useState(null);
+  const [loadingStats, setLoadingStats] = useState(false);
+
+  const filteredProjects = useMemo(() => {
+    const q = String(projectSearch || '').trim().toLowerCase();
+    return (projects || [])
+      .filter((p) => {
+        const isActive = p?.status !== false;
+        if (projectStatusFilter === 'active') return isActive;
+        if (projectStatusFilter === 'inactive') return !isActive;
+        return true;
+      })
+      .filter((p) => {
+        if (!q) return true;
+        return String(p?.name || '').toLowerCase().includes(q);
+      });
+  }, [projects, projectSearch, projectStatusFilter]);
+
+  const projectIdRef = useRef(projectId);
+  useEffect(() => {
+    projectIdRef.current = projectId;
+  }, [projectId]);
+
+  const fetchProjectStats = async (pid) => {
+    if (!pid) {
+      setProjectStats(null);
+      return;
+    }
+    setLoadingStats(true);
+    try {
+      const res = await callEdgeFunction('project-vehicles-stats', {
+        method: 'GET',
+        query: { project_id: pid },
+      });
+      const arr = Array.isArray(res?.data) ? res.data : [];
+      setProjectStats(arr.length ? arr[0] : null);
+    } catch {
+      setProjectStats(null);
+    } finally {
+      setLoadingStats(false);
+    }
+  };
+
+  const statusKey = (name) => String(name || '').toLowerCase().replace(/\s+/g, '_');
+
+  const isEnProceso = (s) => {
+    const sid = Number(s?.status_id);
+    if (!Number.isNaN(sid) && [1, 2, 3].includes(sid)) return true;
+    const k = statusKey(s?.status_name);
+    return ['created', 'accepted', 'loaded', 'in_progress', 'en_proceso'].includes(k);
+  };
+
+  const isEntregado = (s) => {
+    const sid = Number(s?.status_id);
+    if (!Number.isNaN(sid) && sid === 4) return true;
+    const k = statusKey(s?.status_name);
+    return ['completed', 'entregado', 'delivered'].includes(k);
+  };
+
+  const isCancelado = (s) => {
+    const sid = Number(s?.status_id);
+    if (!Number.isNaN(sid) && sid === 5) return true;
+    const k = statusKey(s?.status_name);
+    return ['cancelled', 'canceled', 'cancelado'].includes(k);
+  };
+
+  const filteredServices = useMemo(() => {
+    let rows = services;
+    if (statusTab === 'en_proceso') rows = rows.filter(isEnProceso);
+    if (statusTab === 'entregado') rows = rows.filter(isEntregado);
+    if (statusTab === 'cancelado') rows = rows.filter(isCancelado);
+
+    const q = String(searchText || '').trim().toLowerCase();
+    if (q) {
+      rows = rows.filter((s) => {
+        const hay = [
+          s?.service_id,
+          s?.project_name,
+          s?.origin,
+          s?.destination,
+          s?.status_name,
+        ]
+          .filter(Boolean)
+          .map((v) => String(v).toLowerCase())
+          .join(' ');
+        return hay.includes(q);
+      });
+    }
+
+    if (onlyToday) {
+      rows = rows.filter((s) => {
+        const k = s?.created_at ? String(s.created_at).slice(0, 10) : '';
+        return k === todayKey;
+      });
+    }
+
+    return rows;
+  }, [services, statusTab, searchText, onlyToday, todayKey]);
+
+  const countByTab = useMemo(() => {
+    const enProceso = services.filter(isEnProceso).length;
+    const entregado = services.filter(isEntregado).length;
+    const cancelado = services.filter(isCancelado).length;
+    return { enProceso, entregado, cancelado };
+  }, [services]);
 
   useEffect(() => {
     (async () => {
@@ -38,12 +199,12 @@ export default function ServicesListScreen({ navigation, route }) {
           const mapped = rows.map((p) => ({
             id: String(p.project_id ?? p.id),
             name: String(p.project_name ?? p.name ?? ''),
-            status: p.status,
+            status: normalizeProjectStatus(p.status),
           }));
-          setProjects(mapped.filter((p) => p.id && p.name && p.status !== false));
+          setProjects(mapped.filter((p) => p.id && p.name));
         } catch {
-          const { data: pjs } = await supabase.from('projects').select('project_id, name, status').eq('status', true).order('name');
-          setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name })));
+          const { data: pjs } = await supabase.from('projects').select('project_id, name, status').order('name');
+          setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name, status: normalizeProjectStatus(p.status) })));
         }
       } catch {}
       await load();
@@ -56,6 +217,8 @@ export default function ServicesListScreen({ navigation, route }) {
       .channel('services-list-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, () => {
         load();
+        const pid = projectIdRef.current;
+        if (pid) fetchProjectStats(pid);
       })
       .subscribe();
 
@@ -65,11 +228,62 @@ export default function ServicesListScreen({ navigation, route }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
+  // Web parity: escuchar vehicles.online y reflejarlo en el dot sin recargar
+  useEffect(() => {
+    const channel = supabase
+      .channel('vehicles-online-realtime')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'vehicles' }, (payload) => {
+        const v = payload?.new;
+        const vidRaw = v?.vehicle_id ?? v?.id;
+        if (vidRaw == null) return;
+
+        const vid = Number(vidRaw);
+        const online = !!v?.online;
+        if (Number.isNaN(vid)) return;
+
+        setServices((prev) => {
+          let changed = false;
+          const next = (prev || []).map((s) => {
+            if (!isServiceActive(s?.status_name)) return s;
+            const curV = s?.vehicle;
+            if (!curV || typeof curV !== 'object') return s;
+            const curVidRaw = curV.vehicle_id ?? curV.id;
+            const curVid = Number(curVidRaw);
+            if (Number.isNaN(curVid) || curVid !== vid) return s;
+            if (!!curV.online === online) return s;
+            changed = true;
+            return { ...s, vehicle: { ...curV, online } };
+          });
+          return changed ? next : prev;
+        });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   // Recarga cuando cambie el filtro de proyecto o se regrese con refresh
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, route?.params?.refresh]);
+
+  // Reset a En Proceso cuando cambia el proyecto (paridad con web)
+  useEffect(() => {
+    setStatusTab('en_proceso');
+  }, [projectId]);
+
+  // Cargar métricas cuando se seleccione proyecto
+  useEffect(() => {
+    if (!projectId) {
+      setProjectStats(null);
+      return;
+    }
+    fetchProjectStats(projectId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   const load = async () => {
     try {
@@ -80,18 +294,41 @@ export default function ServicesListScreen({ navigation, route }) {
         if (projectId) q.project_id = Number(projectId);
         const res = await callEdgeFunction('list-services', { method: 'GET', query: q });
         const arr = Array.isArray(res?.data) ? res.data : [];
-        // Normalizar campos a nuestro render
-        const norm = arr.map((it) => ({
-          service_id: it.service_id ?? it.id,
-          project_name: it.project_name ?? it?.project?.name ?? null,
-          created_at: it.created_at ?? it.date ?? null,
-          origin: it.origin ?? null,
-          destination: it.destination ?? null,
-          status_name: it.status_name ?? it.status ?? null,
-          status_id: it.status_id ?? null,
-          // Se mantiene por compatibilidad (p.ej. al abrir edición)
-          order_id: it.order_id ?? it.orderId ?? null,
-        }));
+        // Normalizar campos a nuestro render (paridad con cargoapp-next-main)
+        const norm = arr.map((it) => {
+          const originAddress = typeof it.origin_address === 'object'
+            ? (it.origin_address?.address ?? null)
+            : (it.origin_address ?? it.origin ?? null);
+          const destinationAddress = typeof it.destination_address === 'object'
+            ? (it.destination_address?.address ?? null)
+            : (it.destination_address ?? it.destination ?? null);
+
+          return {
+            service_id: it.service_id ?? it.id,
+            order_id: it.order_id ?? it.orderId ?? null,
+            project_id: it.project_id ?? null,
+            project_name: it.project_name ?? it?.project?.name ?? null,
+
+            vehicle: it.vehicle ?? null,
+            driver: it.driver ?? null,
+            material: it.material ?? null,
+            quantity: it.quantity ?? null,
+            unit: it.unit ?? null,
+
+            status_name: it.status_name ?? it.status ?? 'CREATED',
+            status_id: it.status_id ?? null,
+            substatus_id: it.substatus_id ?? null,
+            substatus_name: it.substatus_name ?? null,
+            pause_reason_id: it.pause_reason_id ?? null,
+            pause_reason_name: it.pause_reason_name ?? null,
+
+            created_at: it.created_at ?? it.date ?? null,
+            origin: it.origin_address?.id ?? it.origin ?? null,
+            destination: it.destination_address?.id ?? it.destination ?? null,
+            origin_address: originAddress,
+            destination_address: destinationAddress,
+          };
+        });
         setServices(norm);
       } catch {
         // Fallback directo: unir con orders para filtrar por proyecto
@@ -112,6 +349,13 @@ export default function ServicesListScreen({ navigation, route }) {
           status_id: null,
         }));
         setServices(norm);
+      }
+
+      // Métricas del proyecto (web parity)
+      if (projectIdRef.current) {
+        fetchProjectStats(projectIdRef.current);
+      } else {
+        setProjectStats(null);
       }
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudieron cargar los servicios');
@@ -147,60 +391,229 @@ export default function ServicesListScreen({ navigation, route }) {
               <MaterialIcons name="arrow-back" size={20} color={COLORS.dark} />
             </TouchableOpacity>
           ) : (
-            <View style={{ width: 40, height: 40 }} />
-          )}
-          <Text style={[styles.headerTitle, { flex: 1 }]}>Servicios</Text>
-          {canCreate && (
-            <TouchableOpacity onPress={() => navigation.navigate('RegisterService', { projectId })} style={styles.smallBtn}>
-              <Text style={styles.smallBtnText}>Nuevo</Text>
+            <TouchableOpacity
+              onPress={() => (navigation?.openDrawer ? navigation.openDrawer() : null)}
+              style={styles.backButton}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="menu" size={20} color={COLORS.dark} />
             </TouchableOpacity>
           )}
+          <Text style={[styles.headerTitle, { flex: 1 }]}>Servicios</Text>
+          <View style={{ width: 40, height: 40 }} />
         </View>
       </View>
 
       <View style={styles.container}>
-        <Text style={styles.fieldLabel}>Proyecto</Text>
-        {Platform.OS === 'ios' ? (
-          <TouchableOpacity
-            style={styles.dropdown}
-            onPress={() => {
-              const items = projects.map((p) => ({ label: p.name, value: p.id }));
-              const options = ['Cancelar', 'Todos', ...items.map((i) => i.label)];
-              ActionSheetIOS.showActionSheetWithOptions(
-                { title: 'Selecciona un proyecto', options, cancelButtonIndex: 0 },
-                (idx) => {
-                  if (idx === 1) setProjectId('');
-                  if (idx > 1) setProjectId(items[idx - 2].value);
-                }
-              );
-            }}
-          >
-            <Text style={styles.dropdownText}>
-              {projects.find((p) => p.id === projectId)?.name || 'Selecciona un proyecto'}
-            </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+        <Modal
+          visible={filtersOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setFiltersOpen(false)}
+        >
+          <View style={styles.filtersModalRoot}>
+            <View style={[styles.filtersDrawer, { width: Math.min(360, Math.round(screenWidth * 0.78)) }]}>
+              <View style={styles.filtersHeaderRow}>
+                <Text style={styles.filtersTitle}>Filtros</Text>
+                <TouchableOpacity style={styles.filtersCloseBtn} activeOpacity={0.8} onPress={() => setFiltersOpen(false)}>
+                  <MaterialIcons name="close" size={18} color={COLORS.grayText} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.filtersSectionLabel}>PROYECTO</Text>
+
+              <View style={styles.filtersSearchWrap}>
+                <MaterialIcons name="search" size={18} color={COLORS.grayText} />
+                <TextInput
+                  value={projectSearch}
+                  onChangeText={setProjectSearch}
+                  placeholder="Buscar proyecto..."
+                  placeholderTextColor={COLORS.grayText}
+                  style={styles.filtersSearchInput}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              </View>
+
+              <View style={styles.filtersSegmentRow}>
+                {[
+                  { key: 'all', label: 'Todos' },
+                  { key: 'active', label: 'Activos' },
+                  { key: 'inactive', label: 'Inactivos' },
+                ].map((s) => {
+                  const active = projectStatusFilter === s.key;
+                  return (
+                    <TouchableOpacity
+                      key={s.key}
+                      style={[styles.segmentBtn, active && styles.segmentBtnActive]}
+                      activeOpacity={0.85}
+                      onPress={() => setProjectStatusFilter(s.key)}
+                    >
+                      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>{s.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <FlatList
+                data={[{ id: '', name: 'Todos los proyectos', status: true }, ...filteredProjects]}
+                keyExtractor={(it) => String(it.id)}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }) => {
+                  const selected = String(projectId) === String(item.id);
+                  return (
+                    <TouchableOpacity
+                      style={[styles.projectListItem, selected && styles.projectListItemActive]}
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        setProjectId(String(item.id || ''));
+                        setFiltersOpen(false);
+                      }}
+                    >
+                      <MaterialIcons name="folder" size={18} color={selected ? COLORS.primary : COLORS.grayText} />
+                      <Text style={[styles.projectListText, selected && styles.projectListTextActive]} numberOfLines={1}>
+                        {String(item.name || '')}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                }}
+                ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
+                contentContainerStyle={{ paddingTop: 8, paddingBottom: 18 }}
+              />
+            </View>
+            <Pressable style={styles.filtersBackdrop} onPress={() => setFiltersOpen(false)} />
+          </View>
+        </Modal>
+
+        <View style={styles.adminHeaderRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.adminTitle}>Administración de Servicios</Text>
+            <Text style={styles.adminBreadcrumb}>Servicios  ›  Administrar</Text>
+          </View>
+          <TouchableOpacity style={styles.iconSquareBtn} activeOpacity={0.8} onPress={() => setFiltersOpen(true)}>
+            <MaterialIcons name="tune" size={18} color={COLORS.foreground || COLORS.dark} />
           </TouchableOpacity>
-        ) : (
-          <View style={styles.dropdown}>
-            <Picker selectedValue={projectId} onValueChange={(v) => setProjectId(v)} style={styles.picker}>
-              <Picker.Item label="Selecciona un proyecto" value="" />
-              {projects.map((p) => (
-                <Picker.Item key={p.id} label={p.name} value={p.id} />
-              ))}
-            </Picker>
+        </View>
+
+        <TouchableOpacity style={styles.projectRow} activeOpacity={0.85} onPress={() => setFiltersOpen(true)}>
+          <View style={styles.projectIcon}>
+            <MaterialIcons name="work-outline" size={16} color={COLORS.primary} />
+          </View>
+          <Text style={styles.projectRowText} numberOfLines={1}>
+            {projects.find((p) => p.id === projectId)?.name || 'Todos los proyectos'}
+          </Text>
+          <MaterialIcons name="arrow-forward-ios" size={16} color={COLORS.grayText} />
+        </TouchableOpacity>
+
+        {!!projectId && (
+          <View style={styles.statsWrapper}>
+            {loadingStats && !projectStats ? (
+              <Text style={styles.statsLoadingText}>Cargando métricas…</Text>
+            ) : (
+              <View style={styles.statsRow}>
+                <View style={styles.statCard}>
+                  <Text style={[styles.statLabel, statLabelStyle]}>Asignados</Text>
+                  <Text style={styles.statValue}>{projectStats?.vehicles_assigned ?? 0}</Text>
+                  <Text style={styles.statHint}>vehículos</Text>
+                </View>
+
+                <View style={[styles.statCard, styles.statCardPrimary]}>
+                  <Text style={[styles.statLabel, styles.statLabelPrimary, statLabelStyle]}>Disponibles</Text>
+                  <Text style={[styles.statValue, styles.statValuePrimary]}>{projectStats?.vehicles_available ?? 0}</Text>
+                  <Text style={styles.statHint}>vehículos</Text>
+                </View>
+
+                <View style={styles.statCard}>
+                  <Text style={[styles.statLabel, statLabelStyle]}>En proceso</Text>
+                  <Text style={styles.statValue}>{projectStats?.services_in_process ?? 0}</Text>
+                  <Text style={styles.statHint}>servicios</Text>
+                </View>
+
+                <View style={[styles.statCard, styles.statCardPrimarySoft]}>
+                  <Text style={[styles.statLabel, styles.statLabelPrimary, statLabelStyle]}>Entregados</Text>
+                  <Text style={[styles.statValue, styles.statValuePrimary]}>{projectStats?.services_delivered_today ?? 0}</Text>
+                  <Text style={styles.statHint}>hoy</Text>
+                </View>
+
+                <View style={[styles.statCard, styles.statCardDangerSoft]}>
+                  <Text style={[styles.statLabel, styles.statLabelDanger, statLabelStyle]}>Cancelados</Text>
+                  <Text style={[styles.statValue, styles.statValueDanger]}>{projectStats?.services_canceled_today ?? 0}</Text>
+                  <Text style={styles.statHint}>hoy</Text>
+                </View>
+              </View>
+            )}
           </View>
         )}
 
-        <TouchableOpacity onPress={load} style={[styles.button, { marginTop: 0 }]} activeOpacity={0.85}>
-          <Text style={styles.buttonText}>{loading ? 'Cargando…' : 'Buscar'}</Text>
-        </TouchableOpacity>
+        <View style={styles.searchRow}>
+          <View style={styles.searchInputWrap}>
+            <MaterialIcons name="search" size={18} color={COLORS.grayText} />
+            <TextInput
+              value={searchText}
+              onChangeText={setSearchText}
+              placeholder="Buscar servicios…"
+              placeholderTextColor={COLORS.grayText}
+              style={styles.searchInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="search"
+            />
+          </View>
+
+          <TouchableOpacity
+            style={styles.calendarBtn}
+            activeOpacity={0.85}
+            onPress={() => setOnlyToday((v) => !v)}
+          >
+            <MaterialIcons name="calendar-today" size={18} color={COLORS.grayText} />
+          </TouchableOpacity>
+
+          <Switch
+            value={onlyToday}
+            onValueChange={setOnlyToday}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.white}
+          />
+
+          {canCreate && (
+            <TouchableOpacity
+              onPress={() => navigation.navigate('RegisterService', { projectId })}
+              style={styles.newBtn}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.newBtnText}>+ Nuevo</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={styles.tabsRow}>
+          {[
+            { key: 'en_proceso', label: 'En Proceso', count: countByTab.enProceso },
+            { key: 'entregado', label: 'Entregado', count: countByTab.entregado },
+            { key: 'cancelado', label: 'Cancelado', count: countByTab.cancelado },
+          ].map((t) => {
+            const active = statusTab === t.key;
+            return (
+              <TouchableOpacity
+                key={t.key}
+                onPress={() => setStatusTab(t.key)}
+                activeOpacity={0.85}
+                style={[styles.tabBtn, active && styles.tabBtnActive]}
+              >
+                <Text style={[styles.tabText, active && styles.tabTextActive]}>
+                  {t.label} {t.count}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
 
         <FlatList
-          data={services}
+          data={filteredServices}
           keyExtractor={(it) => String(it.service_id)}
           renderItem={({ item }) => (
             <TouchableOpacity
-              style={styles.card}
+              style={styles.serviceCard}
               onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId })}
               onLongPress={() => {
                 const statusUpper = String(item.status_name || '').toUpperCase();
@@ -227,17 +640,131 @@ export default function ServicesListScreen({ navigation, route }) {
               }}
               delayLongPress={250}
             >
-              <Text style={styles.cardTitle} numberOfLines={2}>{item.project_name || 'Proyecto'}</Text>
-              <Text style={styles.cardMeta}>Fecha: {item.created_at ? String(item.created_at).slice(0, 10) : '—'}</Text>
-              <Text style={styles.cardMeta}>Origen: {item.origin || '—'}</Text>
-              <Text style={styles.cardMeta}>Destino: {item.destination || '—'}</Text>
-              {!!item.status_name && (
-                <Text style={styles.cardMeta}>Estado: {String(item.status_name)}</Text>
-              )}
+              {(() => {
+                const originText = item?.origin_address || item?.origin || '';
+                const destinationText = item?.destination_address || item?.destination || '';
+                const routeText = originText && destinationText
+                  ? `${originText} → ${destinationText}`
+                  : (originText || destinationText || 'Sin ruta');
+                const v = item?.vehicle;
+                const vehiclePlate = v ? String(v?.plate || '').trim() : '';
+                const vehicleCap = v && v?.capacity_m3 != null ? Number(v.capacity_m3) : null;
+                const vehicleOnline = !!(v && v?.online);
+
+                const materialName = item?.material
+                  ? (typeof item.material === 'object' ? (item.material?.name ?? '') : String(item.material))
+                  : '';
+                const unitName = item?.unit
+                  ? (typeof item.unit === 'object' ? (item.unit?.name ?? '') : String(item.unit))
+                  : '';
+                const qty = item?.quantity != null && String(item.quantity) !== '' ? String(item.quantity) : '';
+
+                const statusName = String(item?.status_name || 'CREATED');
+                const stVariant = statusVariant(statusName);
+                const active = isServiceActive(statusName);
+                const sub = item?.substatus_name ? String(item.substatus_name) : '';
+                const pauseReason = item?.pause_reason_name ? String(item.pause_reason_name) : '';
+
+                return (
+                  <>
+                    <View style={styles.serviceTopRow}>
+                      <View style={styles.serviceLeftIcon}>
+                        <MaterialIcons name="build" size={16} color={COLORS.grayText} />
+                        {!!(v && active) && (
+                          <View
+                            style={[
+                              styles.serviceOnlineDot,
+                              { backgroundColor: vehicleOnline ? COLORS.success : COLORS.grayText },
+                            ]}
+                          />
+                        )}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={styles.serviceTitleRow}>
+                          <Text style={styles.serviceTitle} numberOfLines={1}>Servicio #{item.service_id}</Text>
+                          <Text style={styles.serviceDate} numberOfLines={1}>{formatDateEs(item.created_at)}</Text>
+                        </View>
+
+                        {!!v && (
+                          <View style={styles.serviceLine}>
+                            <MaterialIcons name="local-shipping" size={14} color={COLORS.grayText} />
+                            <Text style={styles.serviceLineText} numberOfLines={1}>
+                              {vehiclePlate ? vehiclePlate : 'Vehículo'}{vehicleCap ? ` · ${vehicleCap}m³` : ''}
+                            </Text>
+                          </View>
+                        )}
+
+                        {!!materialName && (
+                          <View style={styles.serviceLine}>
+                            <MaterialIcons name="inventory-2" size={14} color={COLORS.grayText} />
+                            <Text style={styles.serviceLineText} numberOfLines={1}>
+                              {materialName}{qty && unitName ? ` (${qty} ${unitName})` : (qty ? ` (${qty})` : '')}
+                            </Text>
+                          </View>
+                        )}
+
+                        <View style={styles.serviceLine}>
+                          <MaterialIcons name="map" size={14} color={COLORS.grayText} />
+                          <Text style={styles.serviceLineText} numberOfLines={1}>{routeText}</Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.serviceChipsRow}>
+                      {!!(item.project_name) && (
+                        <View style={styles.badgeOutline}>
+                          <Text style={styles.badgeOutlineText} numberOfLines={1}>{String(item.project_name)}</Text>
+                        </View>
+                      )}
+
+                      <View
+                        style={[
+                          styles.badge,
+                          stVariant === 'in_progress' && styles.badgePrimary,
+                          stVariant === 'completed' && styles.badgeSuccess,
+                          stVariant === 'cancelled' && styles.badgeDanger,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.badgeText,
+                            stVariant === 'in_progress' && styles.badgeTextPrimary,
+                            stVariant === 'completed' && styles.badgeTextSuccess,
+                            stVariant === 'cancelled' && styles.badgeTextDanger,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {statusName}
+                        </Text>
+                      </View>
+
+                      {sub === 'ACTIVED' && (
+                        <View style={styles.badgeOutlineSuccess}>
+                          <Text style={styles.badgeOutlineSuccessText} numberOfLines={1}>ACTIVED</Text>
+                        </View>
+                      )}
+
+                      {!!sub && sub !== 'ACTIVED' && (
+                        <View style={styles.badgeDangerSoft}>
+                          <Text style={styles.badgeDangerSoftText} numberOfLines={1}>
+                            {sub}{pauseReason ? ` · ${pauseReason}` : ''}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </>
+                );
+              })()}
             </TouchableOpacity>
           )}
           ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
-          ListEmptyComponent={<Text style={{ color: '#666', marginTop: 20 }}>No hay servicios.</Text>}
+          ListEmptyComponent={
+            <Text style={{ color: COLORS.grayText, marginTop: 20 }}>
+              No hay servicios.
+            </Text>
+          }
+          refreshing={loading}
+          onRefresh={load}
           contentContainerStyle={{ paddingTop: 12, paddingBottom: 40 }}
         />
       </View>
@@ -246,28 +773,112 @@ export default function ServicesListScreen({ navigation, route }) {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: COLORS.purple },
-  headerArea: { backgroundColor: COLORS.purple, paddingHorizontal: 16, paddingBottom: 10 },
+  screen: { flex: 1, backgroundColor: COLORS.background },
+  headerArea: { backgroundColor: COLORS.background, paddingHorizontal: 16, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   topBarRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
   backButton: {
-    backgroundColor: COLORS.yellow,
+    backgroundColor: COLORS.soft,
     padding: 10,
     borderRadius: 20,
-    elevation: 3,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3,
+    elevation: 2,
+    shadowColor: COLORS.foreground || COLORS.dark,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
   },
-  headerTitle: { color: '#fff', fontSize: 16, fontWeight: '500' },
-  container: { backgroundColor: '#fff', flex: 1, paddingHorizontal: 12, borderTopLeftRadius: 40, borderTopRightRadius: 40 },
-  fieldLabel: { fontSize: 13, color: '#555', marginBottom: 4, marginTop: 12, fontWeight: '600' },
-  dropdown: { borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 10, marginBottom: 12, backgroundColor: '#F3F4F6', overflow: 'hidden', position: 'relative' },
-  dropdownText: { paddingVertical: 14, paddingHorizontal: 12, color: '#333', fontSize: 16 },
-  dropdownIcon: { position: 'absolute', right: 10, top: 12 },
+  headerTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 16, fontWeight: '700' },
+
+  container: { backgroundColor: COLORS.background, flex: 1, paddingHorizontal: 16 },
   picker: { height: 50, width: '100%', backgroundColor: 'transparent' },
-  button: { backgroundColor: COLORS.yellow, paddingVertical: 14, borderRadius: 10, alignItems: 'center', marginTop: 12 },
-  buttonText: { color: '#333', fontSize: 17, fontWeight: '600' },
-  smallBtn: { backgroundColor: COLORS.yellow, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
-  smallBtnText: { color: '#333', fontWeight: '600' },
-  card: { padding: 12, borderWidth: 1, borderColor: '#EEE', borderRadius: 10, backgroundColor: '#fff' },
-  cardTitle: { fontSize: 14, fontWeight: '700', color: '#333' },
-  cardMeta: { fontSize: 12, color: '#666', marginTop: 2 },
+
+  adminHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 },
+  adminTitle: { fontSize: 16, fontWeight: '900', color: COLORS.foreground || COLORS.dark },
+  adminBreadcrumb: { marginTop: 2, fontSize: 12, color: COLORS.grayText },
+  iconSquareBtn: { width: 38, height: 38, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
+
+  projectRow: { marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, paddingVertical: 10, paddingHorizontal: 12 },
+  projectIcon: { width: 28, height: 28, borderRadius: 10, backgroundColor: COLORS.soft, alignItems: 'center', justifyContent: 'center' },
+  projectRowText: { flex: 1, fontSize: 13, fontWeight: '800', color: COLORS.foreground || COLORS.dark },
+
+  filtersModalRoot: { flex: 1, flexDirection: 'row' },
+  filtersBackdrop: { flex: 1, backgroundColor: COLORS.foreground || COLORS.dark, opacity: 0.35 },
+  filtersDrawer: { backgroundColor: COLORS.background, borderRightWidth: 1, borderRightColor: COLORS.border, paddingHorizontal: 16, paddingTop: 16 },
+  filtersHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  filtersTitle: { fontSize: 14, fontWeight: '900', color: COLORS.foreground || COLORS.dark },
+  filtersCloseBtn: { width: 34, height: 34, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
+
+  filtersSectionLabel: { marginTop: 4, fontSize: 11, fontWeight: '900', color: COLORS.grayText, letterSpacing: 0.6 },
+  filtersSearchWrap: { marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, borderRadius: 12, paddingHorizontal: 12, height: 40 },
+  filtersSearchInput: { flex: 1, color: COLORS.foreground || COLORS.dark, fontSize: 13, paddingVertical: 0 },
+
+  filtersSegmentRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  segmentBtn: { flex: 1, height: 34, borderRadius: 999, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
+  segmentBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  segmentText: { fontSize: 12, fontWeight: '900', color: COLORS.grayText },
+  segmentTextActive: { color: COLORS.white },
+
+  projectListItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 12, backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border },
+  projectListItemActive: { backgroundColor: COLORS.soft, borderColor: COLORS.soft },
+  projectListText: { flex: 1, fontSize: 13, fontWeight: '800', color: COLORS.foreground || COLORS.dark },
+  projectListTextActive: { color: COLORS.primary },
+
+  statsWrapper: { marginTop: 10 },
+  statsTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  statsIcon: { width: 28, height: 28, borderRadius: 10, backgroundColor: COLORS.soft, alignItems: 'center', justifyContent: 'center' },
+  statsTitleText: { flex: 1, fontSize: 12, fontWeight: '700', color: COLORS.foreground || COLORS.dark },
+  statsLoadingText: { color: COLORS.grayText, fontSize: 12, paddingVertical: 6 },
+  statsRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  statCard: { width: '19%', backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 4, alignItems: 'center' },
+  statCardPrimary: { borderColor: COLORS.primary },
+  statCardPrimarySoft: { borderColor: COLORS.primary },
+  statCardDangerSoft: { borderColor: COLORS.danger },
+  statLabel: { fontSize: 9, fontWeight: '700', color: COLORS.grayText, textTransform: 'uppercase', letterSpacing: 0.4 },
+  statLabelPrimary: { color: COLORS.primary },
+  statLabelDanger: { color: COLORS.danger },
+  statValue: { marginTop: 6, fontSize: 15, fontWeight: '800', color: COLORS.foreground || COLORS.dark },
+  statValuePrimary: { color: COLORS.primary },
+  statValueDanger: { color: COLORS.danger },
+  statHint: { marginTop: 2, fontSize: 9, color: COLORS.grayText },
+
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12, marginBottom: 6 },
+  searchInputWrap: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, borderRadius: 12, paddingHorizontal: 12, height: 40 },
+  searchInput: { flex: 1, color: COLORS.foreground || COLORS.dark, fontSize: 13, paddingVertical: 0 },
+  calendarBtn: { width: 38, height: 38, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
+  newBtn: { height: 40, borderRadius: 12, backgroundColor: COLORS.primary, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  newBtnText: { color: COLORS.white, fontWeight: '900', fontSize: 13 },
+
+  tabsRow: { flexDirection: 'row', gap: 18, marginTop: 8, marginBottom: 6, borderBottomWidth: 1, borderBottomColor: COLORS.border },
+  tabBtn: { flex: 1, paddingVertical: 10, alignItems: 'center' },
+  tabBtnActive: { borderBottomWidth: 2, borderBottomColor: COLORS.primary },
+  tabText: { fontSize: 12, fontWeight: '900', color: COLORS.grayText },
+  tabTextActive: { color: COLORS.primary },
+
+  serviceCard: { padding: 12, borderWidth: 1, borderColor: COLORS.border, borderRadius: 14, backgroundColor: COLORS.white },
+  serviceTopRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  serviceTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  serviceLeftIcon: { width: 28, height: 28, borderRadius: 10, backgroundColor: COLORS.soft, alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  serviceOnlineDot: { position: 'absolute', top: -2, right: -2, width: 10, height: 10, borderRadius: 99, borderWidth: 2, borderColor: COLORS.white },
+  serviceTitle: { flex: 1, fontSize: 14, fontWeight: '900', color: COLORS.foreground || COLORS.dark },
+  serviceDate: { fontSize: 11, color: COLORS.grayText },
+  serviceLine: { marginTop: 6, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  serviceLineText: { flex: 1, fontSize: 12, color: COLORS.grayText },
+  serviceChipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+
+  badgeOutline: { maxWidth: '70%', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white },
+  badgeOutlineText: { fontSize: 10, fontWeight: '900', color: COLORS.foreground || COLORS.dark },
+
+  badge: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.soft },
+  badgeText: { fontSize: 10, fontWeight: '900', color: COLORS.grayText },
+  badgePrimary: { borderColor: COLORS.primary, backgroundColor: COLORS.soft },
+  badgeTextPrimary: { color: COLORS.primary },
+  badgeSuccess: { borderColor: COLORS.success, backgroundColor: COLORS.soft },
+  badgeTextSuccess: { color: COLORS.success },
+  badgeDanger: { borderColor: COLORS.danger, backgroundColor: COLORS.soft },
+  badgeTextDanger: { color: COLORS.danger },
+
+  badgeOutlineSuccess: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, borderWidth: 1, borderColor: COLORS.success, backgroundColor: COLORS.white },
+  badgeOutlineSuccessText: { fontSize: 10, fontWeight: '900', color: COLORS.success },
+
+  badgeDangerSoft: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, borderWidth: 1, borderColor: COLORS.danger, backgroundColor: COLORS.soft },
+  badgeDangerSoftText: { fontSize: 10, fontWeight: '900', color: COLORS.danger },
 });

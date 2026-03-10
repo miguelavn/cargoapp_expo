@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, Platform, Alert, ActionSheetIOS } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, Platform, Alert, Modal, FlatList, Pressable, ActionSheetIOS } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Picker } from '@react-native-picker/picker';
@@ -7,6 +7,7 @@ import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
 import { COLORS } from '../../../theme/colors';
+import { Button } from '../../../components/ui/Button';
 
 export default function RegisterServiceScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
@@ -16,6 +17,8 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const [loading, setLoading] = useState(false);
   const [projects, setProjects] = useState([]);
   const [vehicles, setVehicles] = useState([]);
+  const [vehiclePickerOpen, setVehiclePickerOpen] = useState(false);
+  const [vehicleQuery, setVehicleQuery] = useState('');
   const [units, setUnits] = useState([]);
   const [purchaseOptions, setPurchaseOptions] = useState([]); // filas de project_materials_availability
   const [transportOptions, setTransportOptions] = useState([]); // filas de transport_orders_availability
@@ -48,6 +51,42 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const handleChange = (k, v) => setForm((s) => ({ ...s, [k]: v }));
 
   const prevTransportSupplierRef = useRef('');
+
+  const selectedProject = useMemo(
+    () => projects.find((p) => String(p.id) === String(form.project_id)) || null,
+    [projects, form.project_id]
+  );
+
+  const selectedPurchase = useMemo(() => {
+    if (!form.purchase_order_id || !form.material_id) return null;
+    return purchaseOptions.find(
+      (r) => String(r.order_id) === String(form.purchase_order_id) && String(r.material_id) === String(form.material_id)
+    ) || null;
+  }, [purchaseOptions, form.purchase_order_id, form.material_id]);
+
+  const selectedTransport = useMemo(() => {
+    if (!form.transport_order_id) return null;
+    return transportOptions.find((r) => String(r.order_id) === String(form.transport_order_id)) || null;
+  }, [transportOptions, form.transport_order_id]);
+
+  const selectedVehicle = useMemo(
+    () => vehicles.find((v) => String(v.id) === String(form.vehicle_id)) || null,
+    [vehicles, form.vehicle_id]
+  );
+
+  const filteredVehicles = useMemo(() => {
+    const q = String(vehicleQuery || '').trim().toLowerCase();
+    if (!q) return vehicles;
+    return vehicles.filter((v) => {
+      const haystack = `${v.name || ''} ${v.label || ''}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [vehicles, vehicleQuery]);
+
+  const selectedUnit = useMemo(
+    () => units.find((u) => String(u.id) === String(form.unit_id)) || null,
+    [units, form.unit_id]
+  );
 
   const formRef = useRef(form);
   useEffect(() => {
@@ -110,28 +149,91 @@ export default function RegisterServiceScreen({ navigation, route }) {
     })();
   }, []);
 
-  // Realtime (como web): refrescar disponibilidad y vehículos cuando cambian órdenes/detalles/vehículos
+  // Realtime (como web): refrescar disponibilidad (OC/OT) y mantener selector de vehículo actualizado
   useEffect(() => {
-    const refresh = async () => {
+    let vehiclesReloadTimer = null;
+
+    const refreshAvailability = async () => {
       const cur = formRef.current;
       if (cur?.project_id) {
         await fetchPurchaseOptions(cur.project_id);
         if (cur?.material_id) await fetchTransportOptions(cur.project_id, cur.material_id);
       }
-      if (cur?.transport_supplier_id) {
-        await loadVehicles(cur.transport_supplier_id);
-      }
+    };
+
+    const scheduleVehiclesReload = () => {
+      if (vehiclesReloadTimer) clearTimeout(vehiclesReloadTimer);
+      vehiclesReloadTimer = setTimeout(() => {
+        const cur = formRef.current;
+        if (cur?.transport_supplier_id) loadVehicles(cur.transport_supplier_id);
+      }, 350);
+    };
+
+    const patchVehicleRow = (row) => {
+      if (!row) return;
+      const vid = String(row.vehicle_id ?? row.id ?? '');
+      if (!vid) return;
+      setVehicles((prev) => {
+        const idx = prev.findIndex((v) => String(v.id) === vid);
+        if (idx === -1) return prev;
+        const old = prev[idx];
+        const nextName = row.plate != null ? String(row.plate || '') : old.name;
+        const nextLabel = (row.model != null || row.capacity_m3 != null || row.plate != null)
+          ? [String(row.model || '').trim(), row.capacity_m3 != null ? `${row.capacity_m3} m³` : '', String(row.plate || '')]
+            .filter((x) => String(x || '').trim())
+            .join(' - ')
+          : old.label;
+        const next = {
+          ...old,
+          online: Object.prototype.hasOwnProperty.call(row, 'online') ? row.online : old.online,
+          is_active: Object.prototype.hasOwnProperty.call(row, 'is_active') ? row.is_active : old.is_active,
+          is_available: Object.prototype.hasOwnProperty.call(row, 'is_available') ? row.is_available : old.is_available,
+          current_service_id: Object.prototype.hasOwnProperty.call(row, 'current_service_id') ? row.current_service_id : old.current_service_id,
+          capacity_m3: row.capacity_m3 != null ? row.capacity_m3 : old.capacity_m3,
+          driver_id: row.driver_id != null ? String(row.driver_id) : old.driver_id,
+          name: nextName,
+          label: nextLabel,
+        };
+        const copy = prev.slice();
+        copy[idx] = next;
+        return copy;
+      });
+    };
+
+    const shouldReloadVehiclesFromUpdate = (oldRow, newRow) => {
+      if (!oldRow || !newRow) return true;
+      const keys = [
+        'is_active',
+        'is_available',
+        'current_service_id',
+        'transport_supplier_id',
+        'created_by_company',
+        'plate',
+        'model',
+      ];
+      return keys.some((k) => String(oldRow?.[k] ?? '') !== String(newRow?.[k] ?? ''));
     };
 
     const channel = supabase
       .channel('register-service-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => { refresh(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_details' }, () => { refresh(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'vehicles' }, () => { refresh(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_vehicles' }, () => { refresh(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, refreshAvailability)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_details' }, refreshAvailability)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, refreshAvailability)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_vehicles' }, scheduleVehiclesReload)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'vehicles' }, (payload) => {
+        patchVehicleRow(payload?.new);
+        if (shouldReloadVehiclesFromUpdate(payload?.old, payload?.new)) scheduleVehiclesReload();
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'vehicles' }, () => {
+        scheduleVehiclesReload();
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'vehicles' }, () => {
+        scheduleVehiclesReload();
+      })
       .subscribe();
 
     return () => {
+      if (vehiclesReloadTimer) clearTimeout(vehiclesReloadTimer);
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -252,6 +354,19 @@ export default function RegisterServiceScreen({ navigation, route }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.vehicle_id, vehicles]);
 
+  // Paridad web: si el vehículo seleccionado deja de cumplir (active/available/online y sin servicio), limpiar selección.
+  useEffect(() => {
+    if (!form.vehicle_id) return;
+    const veh = vehicles.find((v) => String(v.id) === String(form.vehicle_id));
+    if (!veh) return;
+    const stillValid = veh.is_active === true && veh.is_available === true && veh.online === true && veh.current_service_id == null;
+    if (!stillValid) {
+      setForm((s) => ({ ...s, vehicle_id: '', driver_id: '' }));
+      setDriverName('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vehicles]);
+
   // La cantidad siempre se deriva del vehículo seleccionado (capacidad m3)
   useEffect(() => {
     if (!form.vehicle_id) {
@@ -316,10 +431,12 @@ export default function RegisterServiceScreen({ navigation, route }) {
 
       // Filtros base (solo si existen las columnas)
       list = list.filter((v) => {
-        if (v.is_active === false) return false;
-        if (v.is_available === false) return false;
-        if (Object.prototype.hasOwnProperty.call(v, 'online') && v.online === false) return false;
-        if (Object.prototype.hasOwnProperty.call(v, 'current_service_id') && v.current_service_id != null) return false;
+        // Paridad exacta con web (services.tsx):
+        // is_active=true AND is_available=true AND online=true AND current_service_id IS NULL
+        if (v.is_active !== true) return false;
+        if (v.is_available !== true) return false;
+        if (v.online !== true) return false;
+        if (v.current_service_id != null) return false;
         if (companyId != null && Object.prototype.hasOwnProperty.call(v, 'created_by_company') && v.created_by_company != null) {
           if (Number(v.created_by_company) !== Number(companyId)) return false;
         }
@@ -360,6 +477,10 @@ export default function RegisterServiceScreen({ navigation, route }) {
               .join(' - '),
             capacity_m3: v.capacity_m3,
             driver_id: v.driver_id != null ? String(v.driver_id) : '',
+            online: Object.prototype.hasOwnProperty.call(v, 'online') ? v.online : null,
+            is_active: Object.prototype.hasOwnProperty.call(v, 'is_active') ? v.is_active : true,
+            is_available: Object.prototype.hasOwnProperty.call(v, 'is_available') ? v.is_available : true,
+            current_service_id: Object.prototype.hasOwnProperty.call(v, 'current_service_id') ? v.current_service_id : null,
           };
         })
         .filter((v) => v.id && v.name);
@@ -591,16 +712,19 @@ export default function RegisterServiceScreen({ navigation, route }) {
 
   return (
     <View style={styles.screen}>
-      <View style={[styles.headerArea, { paddingTop: headerTop }]}> 
+      <View style={[styles.headerArea, { paddingTop: headerTop }]}>
         <View style={styles.topBarRow}>
           <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton} activeOpacity={0.7}>
-            <MaterialIcons name="arrow-back" size={20} color={COLORS.dark} />
+            <MaterialIcons name="arrow-back" size={20} color={COLORS.foreground || COLORS.dark} />
           </TouchableOpacity>
-          <Text style={[styles.headerTitle, { flex: 1 }]}>{serviceId ? 'Editar servicio' : 'Registrar servicio'}</Text>
-          <TouchableOpacity onPress={onSubmit} disabled={loading} style={[styles.smallBtn, loading && { opacity: 0.6 }]}>
-            <Text style={styles.smallBtnText}>{loading ? 'Guardando…' : 'Guardar'}</Text>
-          </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.headerOverline}>Servicios</Text>
+            <Text style={styles.headerTitle}>Detalle del Servicio</Text>
+          </View>
         </View>
+        <Text style={styles.headerSubtitle}>
+          {serviceId ? 'Editar servicio' : 'Crear servicio'}{selectedProject?.name ? ` · ${selectedProject.name}` : ''}
+        </Text>
       </View>
 
       <KeyboardAwareScrollView
@@ -627,7 +751,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
             <Text style={styles.dropdownText}>
               {projects.find((p) => p.id === form.project_id)?.name || 'Selecciona un proyecto'}
             </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+            <MaterialIcons name="arrow-drop-down" size={24} color={COLORS.grayText} style={styles.dropdownIcon} />
           </TouchableOpacity>
         ) : (
           <View style={styles.dropdown}>
@@ -681,7 +805,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
                 ? `OC #${form.purchase_order_id}`
                 : (form.project_id ? 'Selecciona material/OC' : 'Selecciona un proyecto primero')}
             </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+            <MaterialIcons name="arrow-drop-down" size={24} color={COLORS.grayText} style={styles.dropdownIcon} />
           </TouchableOpacity>
         ) : (
           <View style={styles.dropdown}>
@@ -721,6 +845,34 @@ export default function RegisterServiceScreen({ navigation, route }) {
             </Picker>
           </View>
         )}
+
+
+        {selectedPurchase ? (
+          <View style={styles.infoCard}>
+            <View style={styles.infoHeaderRow}>
+              <MaterialIcons name="inventory-2" size={18} color={COLORS.mutedForeground || COLORS.grayText} />
+              <Text style={styles.infoTitle}>{String(selectedPurchase.material_name || 'Material')}</Text>
+            </View>
+            <View style={styles.infoGrid}>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>OC</Text>
+                <Text style={styles.infoValue}>{selectedPurchase.order_code ? `OC ${selectedPurchase.order_code}` : `#${selectedPurchase.order_id}`}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Proveedor</Text>
+                <Text style={styles.infoValue}>{String(selectedPurchase.supplier_name || '—')}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Disponible</Text>
+                <Text style={styles.infoValue}>{`${selectedPurchase.available ?? '—'} ${selectedPurchase.unit_name || ''}`.trim()}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Unidad</Text>
+                <Text style={styles.infoValue}>{String(selectedPurchase.unit_name || selectedUnit?.name || '—')}</Text>
+              </View>
+            </View>
+          </View>
+        ) : null}
 
 
 
@@ -778,7 +930,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
                 ? `OT #${form.transport_order_id}`
                 : (form.project_id ? 'Selecciona una OT' : 'Selecciona un proyecto primero')}
             </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+            <MaterialIcons name="arrow-drop-down" size={24} color={COLORS.grayText} style={styles.dropdownIcon} />
           </TouchableOpacity>
         ) : (
           <View style={styles.dropdown}>
@@ -825,90 +977,149 @@ export default function RegisterServiceScreen({ navigation, route }) {
           </View>
         )}
 
-
-
-
-
-
-
-
-
-
-
-
-
-           <Text style={styles.fieldLabel}>Vehículo</Text>
-        {Platform.OS === 'ios' ? (
-          <TouchableOpacity
-            style={styles.dropdown}
-            onPress={() => {
-              if (!form.transport_order_id) {
-                Alert.alert('Selecciona una OT', 'Primero selecciona la orden de transporte para ver los vehículos disponibles.');
-                return;
-              }
-              const items = vehicles.map((v) => ({
-                label: v.label || v.name,
-                value: v.id,
-                driver_id: v.driver_id,
-                capacity_m3: v.capacity_m3,
-              }));
-              const options = ['Cancelar', ...items.map((i) => i.label)];
-              ActionSheetIOS.showActionSheetWithOptions(
-                { title: 'Selecciona un vehículo', options, cancelButtonIndex: 0 },
-                (idx) => {
-                  if (idx > 0) {
-                    const picked = items[idx - 1];
-                    handleChange('vehicle_id', picked.value);
-                    if (picked.driver_id) handleChange('driver_id', picked.driver_id);
-                    if (picked.capacity_m3 != null && !Number.isNaN(Number(picked.capacity_m3))) handleChange('quantity', String(picked.capacity_m3));
-                  }
-                }
-              );
-            }}
-          >
-            <Text style={styles.dropdownText}>
-              {form.transport_order_id
-                ? ((vehicles.find((v) => v.id === form.vehicle_id)?.label || vehicles.find((v) => v.id === form.vehicle_id)?.name) || 'Selecciona un vehículo')
-                : 'Selecciona una OT primero'}
-            </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.dropdown}>
-            <Picker
-              enabled={!!form.transport_order_id}
-              selectedValue={form.vehicle_id}
-              onValueChange={(v) => {
-                handleChange('vehicle_id', v);
-                const veh = vehicles.find((x) => String(x.id) === String(v));
-                if (veh?.driver_id) handleChange('driver_id', veh.driver_id);
-                if (veh?.capacity_m3 != null && !Number.isNaN(Number(veh.capacity_m3))) handleChange('quantity', String(veh.capacity_m3));
-              }}
-              style={styles.picker}
-            >
-              <Picker.Item
-                label={form.transport_order_id ? 'Selecciona un vehículo' : 'Selecciona una OT primero'}
-                value=""
-              />
-              {form.transport_order_id && vehicles.map((v) => (
-                <Picker.Item key={v.id} label={v.label || v.name} value={v.id} />
-              ))}
-            </Picker>
+        {selectedTransport ? (
+          <View style={styles.infoCard}>
+            <View style={styles.infoHeaderRow}>
+              <MaterialIcons name="local-shipping" size={18} color={COLORS.mutedForeground || COLORS.grayText} />
+              <Text style={styles.infoTitle}>{selectedTransport.order_code ? `OT ${selectedTransport.order_code}` : `OT #${selectedTransport.order_id}`}</Text>
+            </View>
+            <View style={styles.infoGrid}>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Transportista</Text>
+                <Text style={styles.infoValue}>{String(selectedTransport.transport_supplier_name || '—')}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Disponible</Text>
+                <Text style={styles.infoValue}>{`${selectedTransport.total_available ?? '—'} ${selectedTransport.unit_name || ''}`.trim()}</Text>
+              </View>
+              <View style={styles.infoCellFull}>
+                <Text style={styles.infoLabel}>Origen</Text>
+                <Text style={styles.infoValue}>{String(originAddress || '—')}</Text>
+              </View>
+            </View>
           </View>
-        )}
+        ) : null}
 
-        <Text style={styles.fieldLabel}>Conductor</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Conductor"
-          value={
-            !form.vehicle_id
-              ? 'Seleccione un vehículo'
-              : (driverName || (form.driver_id ? `Conductor #${form.driver_id}` : ''))
-          }
-          editable={false}
-          selectTextOnFocus={false}
-        />
+
+
+
+
+
+
+
+
+
+
+
+
+        <Text style={styles.fieldLabel}>Vehículo</Text>
+        <TouchableOpacity
+          style={[styles.dropdown, !form.transport_order_id && styles.dropdownDisabled]}
+          onPress={() => {
+            if (!form.transport_order_id) {
+              Alert.alert('Selecciona una OT', 'Primero selecciona la orden de transporte para ver los vehículos disponibles.');
+              return;
+            }
+            setVehicleQuery('');
+            setVehiclePickerOpen(true);
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.dropdownText, !form.transport_order_id && styles.dropdownTextDisabled]}>
+            {form.transport_order_id
+              ? (selectedVehicle?.label || selectedVehicle?.name || 'Selecciona un vehículo')
+              : 'Selecciona una OT primero'}
+          </Text>
+          {selectedVehicle?.online != null ? (
+            <View style={[styles.vehicleDot, selectedVehicle.online ? styles.vehicleDotOnline : styles.vehicleDotOffline]} />
+          ) : null}
+          <MaterialIcons name="arrow-drop-down" size={24} color={COLORS.grayText} style={styles.dropdownIcon} />
+        </TouchableOpacity>
+
+        <Modal
+          visible={vehiclePickerOpen}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setVehiclePickerOpen(false)}
+        >
+          <Pressable style={styles.modalBackdrop} onPress={() => setVehiclePickerOpen(false)} />
+          <View style={styles.vehicleSheet}>
+            <View style={styles.vehicleSheetHeader}>
+              <Text style={styles.vehicleSheetTitle}>Selecciona un vehículo</Text>
+              <TouchableOpacity onPress={() => setVehiclePickerOpen(false)} style={styles.vehicleSheetClose}>
+                <MaterialIcons name="close" size={22} color={COLORS.grayText} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.vehicleSearchRow}>
+              <MaterialIcons name="search" size={18} color={COLORS.grayText} />
+              <TextInput
+                value={vehicleQuery}
+                onChangeText={setVehicleQuery}
+                placeholder="Buscar por placa o modelo"
+                placeholderTextColor={COLORS.grayText}
+                style={styles.vehicleSearchInput}
+              />
+            </View>
+
+            <FlatList
+              data={filteredVehicles}
+              keyExtractor={(item) => String(item.id)}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={filteredVehicles.length ? undefined : { paddingBottom: 10 }}
+              renderItem={({ item }) => {
+                const isDisabled = item.is_active === false || item.is_available === false || item.online === false || item.current_service_id != null;
+                const isSelected = String(form.vehicle_id) === String(item.id);
+                return (
+                  <TouchableOpacity
+                    style={[styles.vehicleRow, isDisabled && styles.vehicleRowDisabled]}
+                    disabled={isDisabled}
+                    onPress={() => {
+                      handleChange('vehicle_id', item.id);
+                      setVehiclePickerOpen(false);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={[styles.vehicleDot, item.online ? styles.vehicleDotOnline : styles.vehicleDotOffline]} />
+                    <View style={styles.vehicleRowText}>
+                      <Text style={styles.vehicleRowTitle}>{String(item.name || '—')}</Text>
+                      <Text style={styles.vehicleRowSubtitle} numberOfLines={1}>
+                        {String(item.label || '')}
+                      </Text>
+                    </View>
+                    {isSelected ? <MaterialIcons name="check" size={20} color={COLORS.primary} /> : null}
+                  </TouchableOpacity>
+                );
+              }}
+              ListEmptyComponent={
+                <Text style={styles.vehicleEmptyText}>No hay vehículos disponibles.</Text>
+              }
+            />
+          </View>
+        </Modal>
+
+        {selectedVehicle ? (
+          <View style={styles.infoCard}>
+            <View style={styles.infoHeaderRow}>
+              <MaterialIcons name="directions-car" size={18} color={COLORS.mutedForeground || COLORS.grayText} />
+              <Text style={styles.infoTitle}>{String(selectedVehicle.name || 'Vehículo')}</Text>
+            </View>
+            <View style={styles.infoGrid}>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Capacidad</Text>
+                <Text style={styles.infoValue}>{selectedVehicle.capacity_m3 != null ? `${selectedVehicle.capacity_m3} m³` : '—'}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Conductor</Text>
+                <Text style={styles.infoValue}>{driverName || (form.driver_id ? `Conductor #${form.driver_id}` : '—')}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Text style={styles.infoLabel}>Cantidad</Text>
+                <Text style={styles.infoValue}>{form.quantity ? `${form.quantity} ${selectedUnit?.name || ''}`.trim() : '—'}</Text>
+              </View>
+            </View>
+          </View>
+        ) : null}
 
 
 
@@ -917,33 +1128,13 @@ export default function RegisterServiceScreen({ navigation, route }) {
         {/* Material y unidad se derivan de la selección OC/material */}
 
         <Text style={styles.fieldLabel}>Unidad</Text>
-        {Platform.OS === 'ios' ? (
-          <TouchableOpacity
-            style={styles.dropdown}
-            onPress={() => {
-              const items = units.map((u) => ({ label: u.name, value: u.id }));
-              const options = ['Cancelar', ...items.map((i) => i.label)];
-              ActionSheetIOS.showActionSheetWithOptions(
-                { title: 'Selecciona una unidad', options, cancelButtonIndex: 0 },
-                (idx) => { if (idx > 0) handleChange('unit_id', items[idx - 1].value); }
-              );
-            }}
-          >
-            <Text style={styles.dropdownText}>
-              {units.find((u) => u.id === form.unit_id)?.name || 'Selecciona una unidad'}
-            </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.dropdown}>
-            <Picker selectedValue={form.unit_id} onValueChange={(v) => handleChange('unit_id', v)} style={styles.picker}>
-              <Picker.Item label="Selecciona una unidad" value="" />
-              {units.map((u) => (
-                <Picker.Item key={u.id} label={u.name} value={u.id} />
-              ))}
-            </Picker>
-          </View>
-        )}
+        <TextInput
+          style={styles.input}
+          placeholder="Se asigna al seleccionar material"
+          value={selectedUnit?.name || ''}
+          editable={false}
+          selectTextOnFocus={false}
+        />
 
 
 
@@ -1001,7 +1192,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
             <Text style={styles.dropdownText}>
               {destinationAddress || (form.destination ? `Dirección #${form.destination}` : (form.project_id ? (loadingAddresses ? 'Cargando…' : 'Selecciona un destino') : 'Selecciona un proyecto primero'))}
             </Text>
-            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+            <MaterialIcons name="arrow-drop-down" size={24} color={COLORS.grayText} style={styles.dropdownIcon} />
           </TouchableOpacity>
         ) : (
           <View style={styles.dropdown}>
@@ -1026,31 +1217,130 @@ export default function RegisterServiceScreen({ navigation, route }) {
           </View>
         )}
 
+        <View style={{ height: 16 }} />
+        <Button
+          title={serviceId ? 'Guardar cambios' : 'Crear servicio'}
+          onPress={onSubmit}
+          loading={loading}
+          disabled={loading}
+          style={{ width: '100%' }}
+        />
+
+        <View style={{ height: Math.max(16, insets.bottom) }} />
+
       </KeyboardAwareScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: COLORS.purple },
-  headerArea: { backgroundColor: COLORS.purple, paddingHorizontal: 16, paddingBottom: 10 },
-  topBarRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
-  backButton: {
-    backgroundColor: COLORS.yellow,
-    padding: 10,
-    borderRadius: 20,
-    elevation: 3,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3,
+  screen: { flex: 1, backgroundColor: COLORS.background },
+  headerArea: {
+    backgroundColor: COLORS.background,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
-  headerTitle: { color: '#fff', fontSize: 16, fontWeight: '500' },
-  container: { backgroundColor: '#fff', flex: 1, borderTopLeftRadius: 40, borderTopRightRadius: 40 },
-  containerContent: { paddingHorizontal: 12, paddingBottom: 40 },
-  fieldLabel: { fontSize: 13, color: '#555', marginBottom: 4, marginTop: 12, fontWeight: '600' },
-  dropdown: { borderWidth: 1, borderColor: '#F3F4F6', borderRadius: 10, marginBottom: 12, backgroundColor: '#F3F4F6', overflow: 'hidden', position: 'relative' },
-  dropdownText: { paddingVertical: 14, paddingHorizontal: 12, color: '#333', fontSize: 16 },
+  topBarRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 },
+  backButton: { backgroundColor: COLORS.soft, padding: 10, borderRadius: 20 },
+  headerOverline: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '600' },
+  headerTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 18, fontWeight: '700' },
+  headerSubtitle: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 13, fontWeight: '600' },
+
+  container: { flex: 1 },
+  containerContent: { paddingHorizontal: 16, paddingTop: 12 },
+
+  fieldLabel: { fontSize: 13, color: COLORS.mutedForeground || COLORS.grayText, marginBottom: 6, marginTop: 14, fontWeight: '700' },
+  dropdown: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    marginBottom: 8,
+    backgroundColor: COLORS.white,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  dropdownText: { paddingVertical: 14, paddingHorizontal: 12, color: COLORS.foreground || COLORS.dark, fontSize: 16 },
   dropdownIcon: { position: 'absolute', right: 10, top: 12 },
+  dropdownDisabled: {
+    backgroundColor: COLORS.soft,
+  },
+  dropdownTextDisabled: {
+    color: COLORS.grayText,
+  },
   picker: { height: 50, width: '100%', backgroundColor: 'transparent' },
-  input: { borderRadius: 10, padding: 12, marginBottom: 12, fontSize: 16, backgroundColor: '#F3F4F6' },
-  smallBtn: { backgroundColor: COLORS.yellow, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
-  smallBtnText: { color: '#333', fontWeight: '600' },
+  input: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+    fontSize: 16,
+    backgroundColor: COLORS.soft,
+    color: COLORS.foreground || COLORS.dark,
+  },
+
+  infoCard: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    backgroundColor: COLORS.white,
+    padding: 12,
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  infoHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
+  infoTitle: { flex: 1, color: COLORS.foreground || COLORS.dark, fontSize: 15, fontWeight: '700' },
+  infoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  infoCell: { width: '48%' },
+  infoCellFull: { width: '100%' },
+  infoLabel: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '700' },
+  infoValue: { color: COLORS.foreground || COLORS.dark, fontSize: 13, fontWeight: '600', marginTop: 3 },
+
+  modalBackdrop: { flex: 1, backgroundColor: COLORS.foreground || COLORS.dark, opacity: 0.35 },
+  vehicleSheet: {
+    backgroundColor: COLORS.background,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 12,
+    maxHeight: '70%',
+  },
+  vehicleSheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  vehicleSheetTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 16, fontWeight: '800' },
+  vehicleSheetClose: { width: 34, height: 34, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center' },
+
+  vehicleSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+    backgroundColor: COLORS.white,
+  },
+  vehicleSearchInput: { flex: 1, fontSize: 15, color: COLORS.foreground || COLORS.dark },
+
+  vehicleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    gap: 10,
+  },
+  vehicleRowDisabled: { opacity: 0.45 },
+  vehicleRowText: { flex: 1 },
+  vehicleRowTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 15, fontWeight: '800' },
+  vehicleRowSubtitle: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '600', marginTop: 2 },
+  vehicleEmptyText: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 13, fontWeight: '600', paddingVertical: 10 },
+
+  vehicleDot: { width: 10, height: 10, borderRadius: 999 },
+  vehicleDotOnline: { backgroundColor: COLORS.success },
+  vehicleDotOffline: { backgroundColor: COLORS.grayText },
 });
