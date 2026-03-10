@@ -21,6 +21,9 @@ export default function RegisterServiceScreen({ navigation, route }) {
   const [transportOptions, setTransportOptions] = useState([]); // filas de transport_orders_availability
   const [driverName, setDriverName] = useState('');
   const [originAddress, setOriginAddress] = useState('');
+  const [projectAddresses, setProjectAddresses] = useState([]);
+  const [loadingAddresses, setLoadingAddresses] = useState(false);
+  const [destinationAddress, setDestinationAddress] = useState('');
   const [myCompanyId, setMyCompanyId] = useState(null);
   
 
@@ -176,6 +179,60 @@ export default function RegisterServiceScreen({ navigation, route }) {
     })();
   }, [form.origin]);
 
+  // Cargar direcciones de proyecto (modo web) para destino
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!form.project_id) {
+        setProjectAddresses([]);
+        return;
+      }
+      setLoadingAddresses(true);
+      try {
+        const { data, error } = await supabase
+          .from('project_address')
+          .select('id, address, city_id, location')
+          .eq('project_id', Number(form.project_id))
+          .eq('address_type_id', 1);
+        if (!cancelled && !error) {
+          setProjectAddresses(Array.isArray(data) ? data : []);
+        }
+      } catch {
+        if (!cancelled) setProjectAddresses([]);
+      } finally {
+        if (!cancelled) setLoadingAddresses(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [form.project_id]);
+
+  // Resolver destino (id) a dirección para mostrar
+  useEffect(() => {
+    (async () => {
+      const raw = String(form.destination || '').trim();
+      if (!raw) {
+        setDestinationAddress('');
+        return;
+      }
+      const local = projectAddresses.find((a) => String(a.id) === raw);
+      if (local?.address) {
+        setDestinationAddress(String(local.address));
+        return;
+      }
+      const asNum = Number(raw);
+      if (!Number.isNaN(asNum)) {
+        try {
+          const { data } = await supabase.from('project_address').select('address').eq('id', asNum).maybeSingle();
+          setDestinationAddress(String(data?.address || ''));
+          return;
+        } catch {}
+      }
+      setDestinationAddress(raw);
+    })();
+  }, [form.destination, projectAddresses]);
+
   // Sincronizar conductor (ID) desde vehículo y resolver nombre (Edge Function)
   useEffect(() => {
     (async () => {
@@ -229,8 +286,10 @@ export default function RegisterServiceScreen({ navigation, route }) {
         material_supplier_id: '',
         transport_supplier_id: '',
         origin: '',
+        destination: '',
       }));
       setOriginAddress('');
+      setDestinationAddress('');
       setVehicles([]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -420,7 +479,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
     if (selectedAvailability != null && !isNaN(Number(form.quantity)) && Number(form.quantity) > Number(selectedAvailability)) {
       errs.quantity = `Cantidad supera disponible (${selectedAvailability})`;
     }
-    if (!form.destination?.trim()) errs.destination = 'Destino requerido';
+    if (!String(form.destination || '').trim()) errs.destination = 'Destino requerido';
     if (Object.keys(errs).length) return Alert.alert('Validación', Object.values(errs)[0]);
 
     try {
@@ -430,6 +489,8 @@ export default function RegisterServiceScreen({ navigation, route }) {
         try {
           const originNum = Number(form.origin);
           const originValue = !Number.isNaN(originNum) && String(form.origin || '').trim() ? originNum : (form.origin?.trim() || null);
+          const destNum = Number(form.destination);
+          const destValue = !Number.isNaN(destNum) && String(form.destination || '').trim() ? destNum : (form.destination?.trim() || null);
           await callEdgeFunction('update-service', {
             method: 'POST',
             body: {
@@ -445,7 +506,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
               origin: originValue,
-              destination: form.destination.trim(),
+              destination: destValue,
               material_supplier_id: Number(form.material_supplier_id),
               transport_supplier_id: Number(form.transport_supplier_id),
             },
@@ -464,7 +525,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
               origin: form.origin?.trim() || null,
-              destination: form.destination.trim(),
+              destination: form.destination?.trim() || null,
               material_supplier_id: Number(form.material_supplier_id),
               transport_supplier_id: Number(form.transport_supplier_id),
             })
@@ -479,6 +540,8 @@ export default function RegisterServiceScreen({ navigation, route }) {
         try {
           const originNum = Number(form.origin);
           const originValue = !Number.isNaN(originNum) && String(form.origin || '').trim() ? originNum : (form.origin?.trim() || null);
+          const destNum = Number(form.destination);
+          const destValue = !Number.isNaN(destNum) && String(form.destination || '').trim() ? destNum : (form.destination?.trim() || null);
           await callEdgeFunction('create-service', {
             method: 'POST',
             body: {
@@ -493,7 +556,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
               unit_id: Number(form.unit_id),
               quantity: Number(form.quantity),
               origin: originValue,
-              destination: form.destination.trim(),
+              destination: destValue,
               material_supplier_id: Number(form.material_supplier_id),
               transport_supplier_id: Number(form.transport_supplier_id),
             },
@@ -509,7 +572,7 @@ export default function RegisterServiceScreen({ navigation, route }) {
             unit_id: Number(form.unit_id),
             quantity: Number(form.quantity),
             origin: form.origin?.trim() || null,
-            destination: form.destination.trim(),
+            destination: form.destination?.trim() || null,
             material_supplier_id: Number(form.material_supplier_id),
             transport_supplier_id: Number(form.transport_supplier_id),
           });
@@ -906,7 +969,62 @@ export default function RegisterServiceScreen({ navigation, route }) {
         />
 
         <Text style={styles.fieldLabel}>Destino</Text>
-        <TextInput style={styles.input} placeholder="Destino" value={form.destination} onChangeText={(v) => handleChange('destination', v)} />
+        {Platform.OS === 'ios' ? (
+          <TouchableOpacity
+            style={styles.dropdown}
+            onPress={() => {
+              if (!form.project_id) {
+                Alert.alert('Selecciona un proyecto', 'Primero elige un proyecto para listar destinos.');
+                return;
+              }
+              if (loadingAddresses) {
+                Alert.alert('Cargando', 'Cargando direcciones del proyecto…');
+                return;
+              }
+              const items = projectAddresses.map((a) => ({
+                label: String(a.address || `Dirección #${a.id}`),
+                value: String(a.id),
+              }));
+              const options = ['Cancelar', ...items.map((i) => i.label)];
+              ActionSheetIOS.showActionSheetWithOptions(
+                { title: 'Selecciona un destino', options, cancelButtonIndex: 0 },
+                (idx) => {
+                  if (idx > 0) {
+                    const picked = items[idx - 1];
+                    handleChange('destination', picked.value);
+                    setDestinationAddress(picked.label);
+                  }
+                }
+              );
+            }}
+          >
+            <Text style={styles.dropdownText}>
+              {destinationAddress || (form.destination ? `Dirección #${form.destination}` : (form.project_id ? (loadingAddresses ? 'Cargando…' : 'Selecciona un destino') : 'Selecciona un proyecto primero'))}
+            </Text>
+            <MaterialIcons name="arrow-drop-down" size={24} color="#666" style={styles.dropdownIcon} />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.dropdown}>
+            <Picker
+              enabled={!!form.project_id && !loadingAddresses}
+              selectedValue={String(form.destination || '')}
+              onValueChange={(v) => {
+                handleChange('destination', v);
+                const addr = projectAddresses.find((a) => String(a.id) === String(v));
+                setDestinationAddress(String(addr?.address || ''));
+              }}
+              style={styles.picker}
+            >
+              <Picker.Item
+                label={!form.project_id ? 'Selecciona un proyecto primero' : (loadingAddresses ? 'Cargando destinos…' : 'Selecciona un destino')}
+                value=""
+              />
+              {projectAddresses.map((a) => (
+                <Picker.Item key={String(a.id)} label={String(a.address || `Dirección #${a.id}`)} value={String(a.id)} />
+              ))}
+            </Picker>
+          </View>
+        )}
 
       </KeyboardAwareScrollView>
     </View>
