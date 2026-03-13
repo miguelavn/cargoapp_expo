@@ -42,6 +42,9 @@ expo-env.d.ts
 android/
 ios/
 
+# Repo/fixture local (solo referencia)
+cargoapp-next-main/
+
 # Certificates/keys
 *.jks
 *.p8
