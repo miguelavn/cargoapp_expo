@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {},
+  "extends": "expo/tsconfig.base",
+  "exclude": [
+    "cargoapp-next-main",
+    "node_modules"
+  ]
+}

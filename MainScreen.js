@@ -4,6 +4,7 @@ import { supabase } from './supabaseClient';
 import { MaterialIcons } from '@expo/vector-icons';
 import DriverMain from './screens/main/roles/DriverMain';
 import CoordinatorMain from './screens/main/roles/CoordinatorMain';
+import DriverHomeScreen from './screens/main/driver/DriverHomeScreen';
 
 import { usePermissions } from './contexts/PermissionsContext';
 
@@ -16,6 +17,11 @@ const MainScreen = ({ navigation }) => {
   const [companyName, setCompanyName] = useState("");
   const noRoleHandled = useRef(false);
   const { setPermissions: setGlobalPermissions } = usePermissions();
+
+  const hasPermission = (perms, needle) => {
+    const n = String(needle).toLowerCase();
+    return (perms || []).some((p) => String(p?.permission_name || p).toLowerCase() === n);
+  };
   const getGreeting = () => {
     const h = new Date().getHours();
     if (h < 12) return 'Buenos días';
@@ -89,6 +95,16 @@ const MainScreen = ({ navigation }) => {
     };
     fetchFromView();
   }, []);
+
+  const isDriverByPermission = hasPermission(
+    permissions,
+    'view_the_services_assigned_to_me_at_my_company'
+  );
+
+  // Si es conductor por permiso, el Home es el flujo dedicado.
+  if (!loading && isDriverByPermission) {
+    return <DriverHomeScreen />;
+  }
 
   return (
     <View style={{ flex: 1, backgroundColor: '#6C63FF' }}>
