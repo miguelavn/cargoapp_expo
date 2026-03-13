@@ -107,6 +107,38 @@ export default function ServicesListScreen({ navigation, route }) {
     projectIdRef.current = projectId;
   }, [projectId]);
 
+  const orderProjectIdCacheRef = useRef(new Map());
+
+  const statsReloadTimerRef = useRef(null);
+  const statsLastRunAtRef = useRef(0);
+  const STATS_THROTTLE_MS = 1000;
+
+  const scheduleStatsReload = () => {
+    const pid = projectIdRef.current;
+    if (!pid) return;
+
+    const now = Date.now();
+    const elapsed = now - (statsLastRunAtRef.current || 0);
+
+    // Leading: ejecuta de una vez si ya pasó el intervalo.
+    if (elapsed >= STATS_THROTTLE_MS) {
+      statsLastRunAtRef.current = now;
+      fetchProjectStats(pid);
+      return;
+    }
+
+    // Trailing: programa UNA sola ejecución al final del intervalo.
+    if (statsReloadTimerRef.current) return;
+    const wait = Math.max(0, STATS_THROTTLE_MS - elapsed);
+    statsReloadTimerRef.current = setTimeout(() => {
+      statsReloadTimerRef.current = null;
+      const nextPid = projectIdRef.current;
+      if (!nextPid) return;
+      statsLastRunAtRef.current = Date.now();
+      fetchProjectStats(nextPid);
+    }, wait);
+  };
+
   const fetchProjectStats = async (pid) => {
     if (!pid) {
       setProjectStats(null);
@@ -217,8 +249,6 @@ export default function ServicesListScreen({ navigation, route }) {
       .channel('services-list-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, () => {
         load();
-        const pid = projectIdRef.current;
-        if (pid) fetchProjectStats(pid);
       })
       .subscribe();
 
@@ -228,31 +258,128 @@ export default function ServicesListScreen({ navigation, route }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Web parity: escuchar vehicles.online y reflejarlo en el dot sin recargar
+  // Web parity (Services.tsx): estadísticas en tiempo real escuchando 5 tablas.
+  // services: cambia estado (En Proceso/Entregados/Cancelados)
+  // orders/order_details: cambian totales/relaciones
+  // vehicles: online/offline afecta Disponibles
+  // project_vehicles: asignación/desasignación afecta Asignados/Disponibles
   useEffect(() => {
+    const getProjectIdByOrderId = async (orderId) => {
+      const key = String(orderId ?? '').trim();
+      if (!key) return null;
+      if (orderProjectIdCacheRef.current.has(key)) return orderProjectIdCacheRef.current.get(key);
+      try {
+        const asNum = Number(orderId);
+        const { data } = await supabase
+          .from('orders')
+          .select('project_id')
+          .eq('id', Number.isNaN(asNum) ? orderId : asNum)
+          .maybeSingle();
+        const pid = data?.project_id != null ? String(data.project_id) : null;
+        orderProjectIdCacheRef.current.set(key, pid);
+        return pid;
+      } catch {
+        return null;
+      }
+    };
+
+    const refreshStatsIfNeeded = (projectIdMaybe) => {
+      const fp = projectIdRef.current;
+      if (!fp) return;
+      if (!projectIdMaybe || String(projectIdMaybe) === String(fp)) {
+        scheduleStatsReload();
+      }
+    };
+
+    const channel = supabase
+      .channel('services-stats-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, async (payload) => {
+        const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || {};
+        // services puede (o no) incluir project_id; si no, resolver via orders.
+        if (row.project_id != null) {
+          refreshStatsIfNeeded(String(row.project_id));
+          return;
+        }
+        if (row.order_id != null) {
+          const pid = await getProjectIdByOrderId(row.order_id);
+          if (pid) refreshStatsIfNeeded(pid);
+          return;
+        }
+        refreshStatsIfNeeded(undefined);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async (payload) => {
+        const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || {};
+        if (row.id != null && row.project_id != null) {
+          orderProjectIdCacheRef.current.set(String(row.id), String(row.project_id));
+        }
+        refreshStatsIfNeeded(row.project_id != null ? String(row.project_id) : undefined);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_details' }, async (payload) => {
+        const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || {};
+        if (!row.order_id) return;
+        const pid = await getProjectIdByOrderId(row.order_id);
+        if (pid) refreshStatsIfNeeded(pid);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'vehicles' }, () => {
+        // Cualquier cambio de vehículo puede afectar DISPONIBLES
+        refreshStatsIfNeeded();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'project_vehicles' }, async (payload) => {
+        const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || {};
+        refreshStatsIfNeeded(row.project_id != null ? String(row.project_id) : undefined);
+      })
+      .subscribe();
+
+    return () => {
+      if (statsReloadTimerRef.current) clearTimeout(statsReloadTimerRef.current);
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Web parity (cargoapp-next-main): subscribir a vehicles solo si hay servicios activos con vehículo.
+  // En cada UPDATE, solo parchear online en servicios activos cuyo vehicle_id esté renderizado.
+  useEffect(() => {
+    const activeVehicleIds = (services || [])
+      .filter((s) => isServiceActive(s?.status_name))
+      .map((s) => s?.vehicle?.id ?? s?.vehicle?.vehicle_id ?? s?.vehicle_id)
+      .filter((x) => x != null)
+      .map((x) => Number(x))
+      .filter((x) => !Number.isNaN(x));
+
+    const uniqueIds = [...new Set(activeVehicleIds)];
+    if (uniqueIds.length === 0) return;
+
+    const idSet = new Set(uniqueIds);
+
     const channel = supabase
       .channel('vehicles-online-realtime')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'vehicles' }, (payload) => {
-        const v = payload?.new;
-        const vidRaw = v?.vehicle_id ?? v?.id;
-        if (vidRaw == null) return;
-
-        const vid = Number(vidRaw);
-        const online = !!v?.online;
-        if (Number.isNaN(vid)) return;
+        const row = payload?.new;
+        const vehicleIdRaw = row?.vehicle_id ?? row?.id;
+        const vehicleId = Number(vehicleIdRaw);
+        if (Number.isNaN(vehicleId)) return;
+        if (!idSet.has(vehicleId)) return;
 
         setServices((prev) => {
           let changed = false;
           const next = (prev || []).map((s) => {
             if (!isServiceActive(s?.status_name)) return s;
+
             const curV = s?.vehicle;
-            if (!curV || typeof curV !== 'object') return s;
-            const curVidRaw = curV.vehicle_id ?? curV.id;
+            const curVidRaw = s?.vehicle?.id ?? s?.vehicle?.vehicle_id ?? s?.vehicle_id;
             const curVid = Number(curVidRaw);
-            if (Number.isNaN(curVid) || curVid !== vid) return s;
-            if (!!curV.online === online) return s;
+            if (Number.isNaN(curVid) || curVid !== vehicleId) return s;
+
+            const prevOnline = curV && typeof curV === 'object' ? curV.online : null;
+            if (prevOnline === row?.online) return s;
+
             changed = true;
-            return { ...s, vehicle: { ...curV, online } };
+            const nextVehicle = curV && typeof curV === 'object'
+              ? { ...curV, online: row?.online }
+              : { id: curVidRaw, vehicle_id: curVidRaw, online: row?.online };
+
+            return { ...s, vehicle_id: s?.vehicle_id ?? curVidRaw, vehicle: nextVehicle };
           });
           return changed ? next : prev;
         });
@@ -262,7 +389,7 @@ export default function ServicesListScreen({ navigation, route }) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [services]);
 
   // Recarga cuando cambie el filtro de proyecto o se regrese con refresh
   useEffect(() => {
@@ -303,13 +430,21 @@ export default function ServicesListScreen({ navigation, route }) {
             ? (it.destination_address?.address ?? null)
             : (it.destination_address ?? it.destination ?? null);
 
+          const rawVehicle = it.vehicle ?? null;
+          const rawVehicleId = it.vehicle_id ?? it.vehicleId ?? rawVehicle?.vehicle_id ?? rawVehicle?.id ?? null;
+          const normalizedVehicle = rawVehicle && typeof rawVehicle === 'object'
+            ? rawVehicle
+            : (rawVehicleId != null ? { id: rawVehicleId, vehicle_id: rawVehicleId, online: null } : null);
+
           return {
             service_id: it.service_id ?? it.id,
             order_id: it.order_id ?? it.orderId ?? null,
             project_id: it.project_id ?? null,
             project_name: it.project_name ?? it?.project?.name ?? null,
 
-            vehicle: it.vehicle ?? null,
+            vehicle_id: rawVehicleId,
+
+            vehicle: normalizedVehicle,
             driver: it.driver ?? null,
             material: it.material ?? null,
             quantity: it.quantity ?? null,
@@ -351,12 +486,6 @@ export default function ServicesListScreen({ navigation, route }) {
         setServices(norm);
       }
 
-      // Métricas del proyecto (web parity)
-      if (projectIdRef.current) {
-        fetchProjectStats(projectIdRef.current);
-      } else {
-        setProjectStats(null);
-      }
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudieron cargar los servicios');
     } finally {
@@ -551,7 +680,7 @@ export default function ServicesListScreen({ navigation, route }) {
             <TextInput
               value={searchText}
               onChangeText={setSearchText}
-              placeholder="Buscar servicios…"
+              placeholder="Buscar servicio"
               placeholderTextColor={COLORS.grayText}
               style={styles.searchInput}
               autoCapitalize="none"
@@ -614,14 +743,14 @@ export default function ServicesListScreen({ navigation, route }) {
           renderItem={({ item }) => (
             <TouchableOpacity
               style={styles.serviceCard}
-              onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId })}
+              onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId, statusName: item.status_name, statusId: item.status_id })}
               onLongPress={() => {
                 const statusUpper = String(item.status_name || '').toUpperCase();
-                const canCancel = canUpdate && (!item.status_name || statusUpper === 'CREATED');
+                const canCancel = canUpdate && ['CREATED', 'ACCEPTED'].includes(statusUpper);
 
                 const buttons = [
                   { text: 'Cerrar', style: 'cancel' },
-                  { text: 'Editar', onPress: () => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId }) },
+                  { text: 'Editar', onPress: () => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId, statusName: item.status_name, statusId: item.status_id }) },
                 ];
                 if (canCancel) {
                   buttons.push({

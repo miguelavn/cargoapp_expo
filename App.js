@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { Text, View, Pressable } from 'react-native';
+import { useFonts } from 'expo-font';
 import { NavigationContainer } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -26,6 +27,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { PermissionsProvider } from './contexts/PermissionsContext';
 import { supabase } from './supabaseClient';
+import { COLORS } from './theme/colors';
 
 const Tab = createBottomTabNavigator();
 
@@ -99,6 +101,11 @@ function TabNavigator() {
 }
 
 export default function App() {
+  const [fontsLoaded] = useFonts({
+    ...MaterialIcons.font,
+    ...MaterialCommunityIcons.font,
+  });
+
   // Control de estado de sesión global para navegación condicional inicial
   const [initialRoute, setInitialRoute] = React.useState('Login');
   const sessionCheckedRef = React.useRef(false);
@@ -121,6 +128,10 @@ export default function App() {
       listener?.subscription?.unsubscribe();
     };
   }, []);
+
+  if (!fontsLoaded) {
+    return <View style={{ flex: 1, backgroundColor: COLORS.background }} />;
+  }
 
   return (
     <PermissionsProvider>
