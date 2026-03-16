@@ -86,41 +86,6 @@ export default function DriverHomeScreen() {
 	const heartbeatEnabled = isDriver && vehicle?.is_active === true;
 	useVehicleHeartbeat({ enabled: heartbeatEnabled });
 
-	if (!isDriver) return null;
-
-	if (loading) {
-		return (
-			<View style={styles.center}>
-				<ActivityIndicator color={COLORS.primary} />
-				<Text style={styles.muted}>Cargando dashboard…</Text>
-			</View>
-		);
-	}
-
-	if (error) {
-		return (
-			<View style={styles.center}>
-				<Text style={styles.errorTitle}>{error}</Text>
-			</View>
-		);
-	}
-
-	const plate = String(vehicle?.plate || vehicle?.plate_number || vehicle?.name || '—');
-	const brand = String(vehicle?.brand || '—');
-	const model = String(vehicle?.model || '—');
-	const type = String(vehicle?.type || '—');
-	const capacityText = vehicle?.capacity_m3 != null && String(vehicle.capacity_m3).trim() !== ''
-		? `${vehicle.capacity_m3} m³`
-		: '—';
-	const available = !!vehicle?.is_available;
-	const realOnline = isConnected && vehicle?.online === true;
-	const isServiceRequested =
-		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
-	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
-	const hasNonTerminalActiveService =
-		!!activeService && statusNameUpper !== 'CANCELED' && statusNameUpper !== 'DELIVERED';
-	const canToggleAvailability = !hasNonTerminalActiveService;
-
 	const playAlert = async () => {
 		try {
 			Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -167,6 +132,41 @@ export default function DriverHomeScreen() {
 			lastServiceIdRef.current = serviceId;
 		}
 	}, [activeService]);
+
+	if (!isDriver) return null;
+
+	if (loading) {
+		return (
+			<View style={styles.center}>
+				<ActivityIndicator color={COLORS.primary} />
+				<Text style={styles.muted}>Cargando dashboard…</Text>
+			</View>
+		);
+	}
+
+	if (error) {
+		return (
+			<View style={styles.center}>
+				<Text style={styles.errorTitle}>{error}</Text>
+			</View>
+		);
+	}
+
+	const plate = String(vehicle?.plate || vehicle?.plate_number || vehicle?.name || '—');
+	const brand = String(vehicle?.brand || '—');
+	const model = String(vehicle?.model || '—');
+	const type = String(vehicle?.type || '—');
+	const capacityText = vehicle?.capacity_m3 != null && String(vehicle.capacity_m3).trim() !== ''
+		? `${vehicle.capacity_m3} m³`
+		: '—';
+	const available = !!vehicle?.is_available;
+	const realOnline = isConnected && vehicle?.online === true;
+	const isServiceRequested =
+		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
+	const hasNonTerminalActiveService =
+		!!activeService && statusNameUpper !== 'CANCELED' && statusNameUpper !== 'DELIVERED';
+	const canToggleAvailability = !hasNonTerminalActiveService;
 
 	const respondToService = async (action) => {
 		if (!activeService?.service_id) return;
