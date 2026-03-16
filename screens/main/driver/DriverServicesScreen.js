@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import { useDriverDashboard } from '../../../hooks/useDriverDashboard';
@@ -11,6 +12,7 @@ function hasPerm(perms = [], needle) {
 }
 
 export default function DriverServicesScreen() {
+	const insets = useSafeAreaInsets();
 	const { permissions } = usePermissions();
 	const isDriver = useMemo(
 		() => hasPerm(permissions, 'view_the_services_assigned_to_me_at_my_company'),
@@ -62,7 +64,16 @@ export default function DriverServicesScreen() {
 	}
 
 	return (
-		<View style={styles.screen}>
+		<SafeAreaView
+			edges={['left', 'right']}
+			style={[
+				styles.screen,
+				{
+					paddingTop: insets.top + 18,
+					paddingBottom: insets.bottom + 100,
+				},
+			]}
+		>
 			<Text style={styles.title}>Servicios</Text>
 			<View style={styles.card}>
 				{activeService ? (
@@ -107,7 +118,7 @@ export default function DriverServicesScreen() {
 					<Text style={styles.muted}>No tienes un servicio activo.</Text>
 				)}
 			</View>
-		</View>
+		</SafeAreaView>
 	);
 }
 

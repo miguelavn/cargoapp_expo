@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import DriverAvailabilityToggle from '../../../components/DriverAvailabilityToggle';
@@ -75,6 +75,7 @@ export default function DriverHomeScreen() {
 	const [serviceActionLoading, setServiceActionLoading] = useState('');
 	const [serviceActionError, setServiceActionError] = useState('');
 	const serviceActionInFlightRef = useRef(false);
+	const insets = useSafeAreaInsets();
 	const isConnected = useIsOnline();
 
 	const heartbeatEnabled = isDriver && vehicle?.is_active === true;
@@ -141,7 +142,16 @@ export default function DriverHomeScreen() {
 	};
 
 	return (
-		<SafeAreaView style={styles.screen}>
+		<SafeAreaView
+			edges={['left', 'right']}
+			style={[
+				styles.screen,
+				{
+					paddingTop: insets.top + 22,
+					paddingBottom: insets.bottom + 100,
+				},
+			]}
+		>
 			<View style={styles.header}>
 				<Text style={styles.headerOverline}>Conductor</Text>
 				<View style={styles.titleRow}>
