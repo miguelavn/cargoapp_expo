@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
+import { Audio } from 'expo-av';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import DriverAvailabilityToggle from '../../../components/DriverAvailabilityToggle';
@@ -75,6 +77,9 @@ export default function DriverHomeScreen() {
 	const [serviceActionLoading, setServiceActionLoading] = useState('');
 	const [serviceActionError, setServiceActionError] = useState('');
 	const serviceActionInFlightRef = useRef(false);
+	const lastServiceIdRef = useRef(null);
+	const alertSoundRef = useRef(null);
+	const alertSoundLoadingRef = useRef(false);
 	const insets = useSafeAreaInsets();
 	const isConnected = useIsOnline();
 
@@ -115,6 +120,53 @@ export default function DriverHomeScreen() {
 	const hasNonTerminalActiveService =
 		!!activeService && statusNameUpper !== 'CANCELED' && statusNameUpper !== 'DELIVERED';
 	const canToggleAvailability = !hasNonTerminalActiveService;
+
+	const playAlert = async () => {
+		try {
+			Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+			if (!alertSoundRef.current && !alertSoundLoadingRef.current) {
+				alertSoundLoadingRef.current = true;
+				try {
+					const { sound } = await Audio.Sound.createAsync(
+						require('../../../assets/sounds/notification.wav'),
+						{ shouldPlay: false }
+					);
+					alertSoundRef.current = sound;
+				} finally {
+					alertSoundLoadingRef.current = false;
+				}
+			}
+
+			if (alertSoundRef.current?.replayAsync) {
+				await alertSoundRef.current.replayAsync();
+			}
+		} catch (e) {
+			console.warn('Error reproduciendo alerta', e);
+		}
+	};
+
+	useEffect(() => {
+		return () => {
+			try {
+				alertSoundRef.current?.unloadAsync?.();
+			} catch {
+				// ignore
+			}
+			alertSoundRef.current = null;
+		};
+	}, []);
+
+	useEffect(() => {
+		if (!activeService) return;
+		const isCreated = String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+		const serviceId = activeService?.service_id;
+		const isNewService = !!serviceId && serviceId !== lastServiceIdRef.current;
+		if (isCreated && isNewService) {
+			playAlert();
+			lastServiceIdRef.current = serviceId;
+		}
+	}, [activeService]);
 
 	const respondToService = async (action) => {
 		if (!activeService?.service_id) return;
@@ -203,6 +255,11 @@ export default function DriverHomeScreen() {
 				<View style={styles.card}>
 					{activeService ? (
 						<>
+							{isServiceRequested ? (
+								<View style={styles.alertBanner}>
+									<Text style={styles.alertText}>Nuevo servicio disponible</Text>
+								</View>
+							) : null}
 							<Text style={styles.cardTitle}>Servicio #{activeService.service_id}</Text>
 							<Text style={styles.cardSub}>
 								Estado: {String(activeService.status_name || activeService.status_id || '—')}
@@ -287,6 +344,17 @@ const styles = StyleSheet.create({
 		borderRadius: 12,
 		backgroundColor: COLORS.white,
 		padding: 12,
+	},
+	alertBanner: {
+		backgroundColor: COLORS.secondary,
+		padding: 10,
+		borderRadius: 10,
+		marginBottom: 10,
+	},
+	alertText: {
+		fontWeight: '900',
+		textAlign: 'center',
+		color: COLORS.foreground || COLORS.dark,
 	},
 	cardTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 15, fontWeight: '900' },
 	cardSub: { color: COLORS.mutedForeground || COLORS.grayText, marginTop: 4, fontSize: 13, fontWeight: '700' },
