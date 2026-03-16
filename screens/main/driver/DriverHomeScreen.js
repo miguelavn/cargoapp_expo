@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import DriverAvailabilityToggle from '../../../components/DriverAvailabilityToggle';
 import { useVehicleHeartbeat } from '../../../hooks/useVehicleHeartbeat';
 import { useDriverDashboard } from '../../../hooks/useDriverDashboard';
+import { useIsOnline } from '../../../hooks/useIsOnline';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
 import { supabase } from '../../../supabaseClient';
 
@@ -72,8 +74,11 @@ export default function DriverHomeScreen() {
 
 	const [serviceActionLoading, setServiceActionLoading] = useState('');
 	const [serviceActionError, setServiceActionError] = useState('');
+	const serviceActionInFlightRef = useRef(false);
+	const isConnected = useIsOnline();
 
-	useVehicleHeartbeat({ enabled: isDriver });
+	const heartbeatEnabled = isDriver && vehicle?.is_active === true;
+	useVehicleHeartbeat({ enabled: heartbeatEnabled });
 
 	if (!isDriver) return null;
 
@@ -102,15 +107,22 @@ export default function DriverHomeScreen() {
 		? `${vehicle.capacity_m3} m³`
 		: '—';
 	const available = !!vehicle?.is_available;
-	const online = vehicle?.online;
+	const realOnline = isConnected && vehicle?.online === true;
 	const isServiceRequested =
 		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
 	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
 	const hasNonTerminalActiveService =
 		!!activeService && statusNameUpper !== 'CANCELED' && statusNameUpper !== 'DELIVERED';
+	const canToggleAvailability = !hasNonTerminalActiveService;
 
 	const respondToService = async (action) => {
 		if (!activeService?.service_id) return;
+
+		// evitar doble ejecución (doble tap)
+		if (serviceActionLoading) return;
+		if (serviceActionInFlightRef.current) return;
+		serviceActionInFlightRef.current = true;
+
 		setServiceActionError('');
 		setServiceActionLoading(action);
 		try {
@@ -124,6 +136,7 @@ export default function DriverHomeScreen() {
 			setServiceActionError(e?.message || 'No se pudo actualizar el servicio');
 		} finally {
 			setServiceActionLoading('');
+			serviceActionInFlightRef.current = false;
 		}
 	};
 
@@ -134,9 +147,9 @@ export default function DriverHomeScreen() {
 				<View style={styles.titleRow}>
 					<Text style={styles.headerTitle}>{greetingText}</Text>
 					<View style={styles.onlineBadge}>
-						<View style={[styles.dot, online ? styles.dotOn : styles.dotOff]} />
+						<View style={[styles.dot, realOnline ? styles.dotOn : styles.dotOff]} />
 						<Text style={styles.onlineText}>
-							{online == null ? '—' : online ? 'Online' : 'Offline'}
+							{!isConnected ? 'Sin conexión' : realOnline ? 'Online' : 'Offline'}
 						</Text>
 					</View>
 				</View>
@@ -156,7 +169,7 @@ export default function DriverHomeScreen() {
 			<DriverAvailabilityToggle
 				value={available}
 				onChange={(v) => setAvailability(v)}
-				disableAvailable={hasNonTerminalActiveService}
+				disabled={!canToggleAvailability}
 			/>
 
 			<View style={{ height: 14 }} />
