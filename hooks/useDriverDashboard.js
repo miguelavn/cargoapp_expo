@@ -17,6 +17,11 @@ export function useDriverDashboard(enabled) {
 		canceledToday: 0,
 	});
 
+	const stateRef = useRef(state);
+	useEffect(() => {
+		stateRef.current = state;
+	}, [state]);
+
 	const mountedRef = useRef(true);
 	useEffect(() => {
 		mountedRef.current = true;
@@ -33,16 +38,82 @@ export function useDriverDashboard(enabled) {
 		return normalizeId(state.activeService?.service_id);
 	}, [state.activeService]);
 
-	const refetch = useCallback(async () => {
+	const refetchInFlightRef = useRef(false);
+	const lastRefetchAtRef = useRef(0);
+
+	const refetch = useCallback(async ({ silent = false } = {}) => {
 		if (!enabled) return;
-		setState((s) => ({ ...s, loading: true, error: '' }));
+		if (refetchInFlightRef.current) return;
+		const now = Date.now();
+		// Evitar ráfagas de refetch por eventos Realtime/heartbeat.
+		if (silent && now - lastRefetchAtRef.current < 1200) return;
+		lastRefetchAtRef.current = now;
+		refetchInFlightRef.current = true;
+		setState((s) => ({ ...s, loading: silent ? s.loading : true, error: '' }));
 		try {
 			const json = await callEdgeFunction('driver-dashboard', { method: 'GET' });
+
+			let vehicle = json?.vehicle ?? null;
+			// En algunos payloads puede venir como `id` aunque en DB sea `vehicle_id`.
+			const vehicleIdFromEdge = normalizeId(vehicle?.vehicle_id ?? vehicle?.id ?? json?.vehicle_id);
+
+			// Consultar directamente el vehículo desde `vehicles` (fuente principal para datos del vehículo).
+			// Si falla por RLS u otro motivo, mantenemos el objeto que venga del dashboard.
+			const vehicleSelect =
+				'vehicle_id, plate, type, brand, model, year, capacity_m3, is_active, is_available, driver_id, online, last_heartbeat, current_service_id';
+
+			if (vehicleIdFromEdge) {
+				try {
+					const res = await supabase
+						.from('vehicles')
+						.select(vehicleSelect)
+						.eq('vehicle_id', vehicleIdFromEdge)
+						.maybeSingle();
+					if (res.error) throw res.error;
+					if (res.data) vehicle = { ...vehicle, ...res.data };
+				} catch (e) {
+					// eslint-disable-next-line no-console
+					console.warn('[driver-dashboard] No se pudo leer vehicles (RLS?)', e?.message || e);
+				}
+			}
+
+			// Fallback: si la Edge Function no trajo vehicle_id, resolver por driver_id del usuario actual.
+			if (!vehicleIdFromEdge) {
+				try {
+					const { data: auth } = await supabase.auth.getUser();
+					const authUser = auth?.user;
+					if (authUser?.id) {
+						const u = await supabase
+							.from('app_users')
+							.select('user_id')
+							.eq('auth_id', authUser.id)
+							.maybeSingle();
+						if (u.error) throw u.error;
+						const driverId = u.data?.user_id;
+						if (driverId != null) {
+							const v = await supabase
+								.from('vehicles')
+								.select(vehicleSelect)
+								.eq('driver_id', driverId)
+								.eq('is_active', true)
+								.order('vehicle_id', { ascending: false })
+								.limit(1)
+								.maybeSingle();
+							if (v.error) throw v.error;
+							if (v.data) vehicle = { ...vehicle, ...v.data };
+						}
+					}
+				} catch (e) {
+					// eslint-disable-next-line no-console
+					console.warn('[driver-dashboard] No se pudo resolver vehículo por driver_id', e?.message || e);
+				}
+			}
+
 			if (!mountedRef.current) return;
 			setState({
 				loading: false,
 				error: '',
-				vehicle: json?.vehicle ?? null,
+				vehicle,
 				activeService: json?.active_service ?? null,
 				deliveredToday: Number(json?.stats?.delivered_today ?? 0) || 0,
 				canceledToday: Number(json?.stats?.canceled_today ?? 0) || 0,
@@ -54,15 +125,17 @@ export function useDriverDashboard(enabled) {
 				loading: false,
 				error: e?.message || 'No se pudo cargar el dashboard del conductor',
 			}));
+		} finally {
+			refetchInFlightRef.current = false;
 		}
 	}, [enabled]);
 
 	useEffect(() => {
 		if (!enabled) return;
-		refetch();
+		refetch({ silent: false });
 	}, [enabled, refetch]);
 
-	// Realtime: si cambia el vehículo del conductor, refrescar dashboard.
+	// Realtime: si cambia el vehículo del conductor, actualizar localmente.
 	useEffect(() => {
 		if (!enabled || !vehicleId) return;
 
@@ -72,7 +145,22 @@ export function useDriverDashboard(enabled) {
 				const row = payload?.new;
 				const updatedId = normalizeId(row?.vehicle_id ?? row?.id);
 				if (!updatedId || updatedId !== vehicleId) return;
-				refetch();
+
+				// Evitar recargar todo: merge directo del vehículo.
+				if (mountedRef.current) {
+					setState((s) => ({
+						...s,
+						vehicle: s.vehicle ? { ...s.vehicle, ...row } : row,
+					}));
+				}
+
+				// Si cambia el servicio actual, ahí sí refrescar (pero en modo silencioso).
+				const prev = stateRef.current?.vehicle;
+				const prevServiceId = normalizeId(prev?.current_service_id);
+				const nextServiceId = normalizeId(row?.current_service_id);
+				if (prevServiceId !== nextServiceId) {
+					refetch({ silent: true });
+				}
 			})
 			.subscribe();
 
@@ -81,7 +169,7 @@ export function useDriverDashboard(enabled) {
 		};
 	}, [enabled, vehicleId, refetch]);
 
-	// Realtime: si cambia el servicio activo actual, refrescar dashboard.
+	// Realtime: si cambia el servicio activo actual, refrescar dashboard (silencioso).
 	useEffect(() => {
 		if (!enabled || !activeServiceId) return;
 
@@ -91,7 +179,7 @@ export function useDriverDashboard(enabled) {
 				'postgres_changes',
 				{ event: '*', schema: 'public', table: 'services', filter: `service_id=eq.${activeServiceId}` },
 				() => {
-					refetch();
+					refetch({ silent: true });
 				}
 			)
 			.subscribe();
@@ -111,20 +199,12 @@ export function useDriverDashboard(enabled) {
 			}));
 			try {
 				// Intento directo (si RLS lo permite). Si no, el usuario verá error.
-				let res = await supabase
+				const res = await supabase
 					.from('vehicles')
 					.update({ is_available: nextAvailable })
 					.eq('vehicle_id', vehicleId)
-					.select('vehicle_id, id');
+					.select('vehicle_id');
 				if (res.error) throw res.error;
-				if (!Array.isArray(res.data) || res.data.length === 0) {
-					res = await supabase
-						.from('vehicles')
-						.update({ is_available: nextAvailable })
-						.eq('id', vehicleId)
-						.select('vehicle_id, id');
-					if (res.error) throw res.error;
-				}
 				// Refrescar para mantener consistencia (por si backend cambia más campos)
 				refetch();
 			} catch (e) {

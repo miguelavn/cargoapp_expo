@@ -26,12 +26,27 @@ const Stack = createNativeStackNavigator();
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { MaterialIcons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { PermissionsProvider } from './contexts/PermissionsContext';
+import { usePermissions } from './contexts/PermissionsContext';
 import { supabase } from './supabaseClient';
 import { COLORS } from './theme/colors';
 
 const Tab = createBottomTabNavigator();
 
+function hasPermission(perms = [], perm) {
+  if (!perm) return false;
+  const needle = String(perm).toLowerCase();
+  return (perms || []).some((p) =>
+    String(p?.permission_name || p).toLowerCase() === needle
+  );
+}
+
 function TabNavigator() {
+  const { permissions } = usePermissions();
+  const isDriver = React.useMemo(
+    () => hasPermission(permissions, 'view_the_services_assigned_to_me_at_my_company'),
+    [permissions]
+  );
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -66,6 +81,10 @@ function TabNavigator() {
         ),
         tabBarIcon: ({ color, focused }) => {
           if (route.name === 'Inicio') {
+            if (isDriver) {
+              const listName = focused ? 'format-list-bulleted' : 'format-list-bulleted-square';
+              return <MaterialCommunityIcons name={listName} size={26} color={color} />;
+            }
             const homeName = focused ? 'home-variant' : 'home-variant-outline';
             return <MaterialCommunityIcons name={homeName} size={26} color={color} />;
           }
@@ -87,7 +106,7 @@ function TabNavigator() {
         },
         tabBarLabel: ({ focused, color }) => (
           <Text style={{ color, fontSize: 11, fontWeight: focused ? '700' : '600' }}>
-            {route.name}
+            {route.name === 'Inicio' && isDriver ? 'Solicitudes' : route.name}
           </Text>
         ),
       })}

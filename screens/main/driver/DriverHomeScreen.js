@@ -1,11 +1,12 @@
-import React, { useMemo } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
-import { MaterialIcons } from '@expo/vector-icons';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import DriverAvailabilityToggle from '../../../components/DriverAvailabilityToggle';
 import { useVehicleHeartbeat } from '../../../hooks/useVehicleHeartbeat';
 import { useDriverDashboard } from '../../../hooks/useDriverDashboard';
+import { callEdgeFunction } from '../../../api/edgeFunctions';
+import { supabase } from '../../../supabaseClient';
 
 function hasPerm(perms = [], needle) {
 	const n = String(needle).toLowerCase();
@@ -19,6 +20,45 @@ export default function DriverHomeScreen() {
 		[permissions]
 	);
 
+	const greeting = useMemo(() => {
+		const h = new Date().getHours();
+		if (h < 12) return 'Buenos días';
+		if (h < 19) return 'Buenas tardes';
+		return 'Buenas noches';
+	}, []);
+
+	const [driverFirstName, setDriverFirstName] = useState('');
+	useEffect(() => {
+		let cancelled = false;
+		(async () => {
+			if (!isDriver) return;
+			try {
+				const { data: auth } = await supabase.auth.getUser();
+				const authUser = auth?.user;
+				if (!authUser?.id) return;
+
+				const { data: appUser, error: appUserErr } = await supabase
+					.from('app_users')
+					.select('display_name, name')
+					.eq('auth_id', authUser.id)
+					.maybeSingle();
+				if (appUserErr) return;
+				const rawName = String(appUser?.name || appUser?.display_name || '').trim();
+				const first = rawName ? rawName.split(/\s+/)[0] : '';
+				if (!cancelled) setDriverFirstName(first);
+			} catch {
+				// ignore
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [isDriver]);
+
+	const greetingText = useMemo(() => {
+		return driverFirstName ? `${greeting} ${driverFirstName}` : greeting;
+	}, [greeting, driverFirstName]);
+
 	const {
 		loading,
 		error,
@@ -27,9 +67,13 @@ export default function DriverHomeScreen() {
 		deliveredToday,
 		canceledToday,
 		setAvailability,
+		refetch,
 	} = useDriverDashboard(isDriver);
 
-	useVehicleHeartbeat({ enabled: isDriver && !loading && !!vehicle });
+	const [serviceActionLoading, setServiceActionLoading] = useState('');
+	const [serviceActionError, setServiceActionError] = useState('');
+
+	useVehicleHeartbeat({ enabled: isDriver });
 
 	if (!isDriver) return null;
 
@@ -51,18 +95,88 @@ export default function DriverHomeScreen() {
 	}
 
 	const plate = String(vehicle?.plate || vehicle?.plate_number || vehicle?.name || '—');
-	const online = vehicle?.online;
+	const brand = String(vehicle?.brand || '—');
+	const model = String(vehicle?.model || '—');
+	const type = String(vehicle?.type || '—');
+	const capacityText = vehicle?.capacity_m3 != null && String(vehicle.capacity_m3).trim() !== ''
+		? `${vehicle.capacity_m3} m³`
+		: '—';
 	const available = !!vehicle?.is_available;
+	const online = vehicle?.online;
+	const isServiceRequested =
+		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
+	const hasNonTerminalActiveService =
+		!!activeService && statusNameUpper !== 'CANCELED' && statusNameUpper !== 'DELIVERED';
+
+	const respondToService = async (action) => {
+		if (!activeService?.service_id) return;
+		setServiceActionError('');
+		setServiceActionLoading(action);
+		try {
+			await callEdgeFunction('driver-service-response', {
+				method: 'POST',
+				body: { service_id: activeService.service_id, action },
+				timeout: 20000,
+			});
+			await refetch({ silent: true });
+		} catch (e) {
+			setServiceActionError(e?.message || 'No se pudo actualizar el servicio');
+		} finally {
+			setServiceActionLoading('');
+		}
+	};
 
 	return (
-		<View style={styles.screen}>
+		<SafeAreaView style={styles.screen}>
 			<View style={styles.header}>
 				<Text style={styles.headerOverline}>Conductor</Text>
-				<Text style={styles.headerTitle}>Inicio</Text>
+				<View style={styles.titleRow}>
+					<Text style={styles.headerTitle}>{greetingText}</Text>
+					<View style={styles.onlineBadge}>
+						<View style={[styles.dot, online ? styles.dotOn : styles.dotOff]} />
+						<Text style={styles.onlineText}>
+							{online == null ? '—' : online ? 'Online' : 'Offline'}
+						</Text>
+					</View>
+				</View>
 			</View>
 
 			<View style={styles.section}>
-				<Text style={styles.sectionTitle}>1️⃣ Servicio asignado actualmente</Text>
+				<Text style={styles.sectionTitle}>Vehículo asignado</Text>
+				<View style={styles.card}>
+					<Text style={styles.cardTitle}>{plate}</Text>
+					<Text style={styles.cardSub}>Marca: {brand}</Text>
+					<Text style={styles.cardSub}>Modelo: {model}</Text>
+					<Text style={styles.cardSub}>Tipo: {type}</Text>
+					<Text style={styles.cardSub}>Capacidad: {capacityText}</Text>
+				</View>
+			</View>
+
+			<DriverAvailabilityToggle
+				value={available}
+				onChange={(v) => setAvailability(v)}
+				disableAvailable={hasNonTerminalActiveService}
+			/>
+
+			<View style={{ height: 14 }} />
+
+			<View style={styles.section}>
+				<Text style={styles.sectionTitle}>Estadísticas de hoy</Text>
+				<View style={styles.row2}>
+					<View style={styles.statCard}>
+						<Text style={styles.statLabel}>Entregados</Text>
+						<Text style={styles.statValue}>{deliveredToday}</Text>
+					</View>
+					<View style={styles.statCard}>
+						<Text style={styles.statLabel}>Cancelados</Text>
+						<Text style={styles.statValue}>{canceledToday}</Text>
+					</View>
+				</View>
+			</View>
+
+			<View style={styles.section}>
+				<Text style={styles.sectionTitle}>Solicitudes de viaje</Text>
 				<View style={styles.card}>
 					{activeService ? (
 						<>
@@ -74,49 +188,42 @@ export default function DriverHomeScreen() {
 								Ruta: {String(activeService.origin_address || activeService.origin || '—')} →{' '}
 								{String(activeService.destination_address || activeService.destination || '—')}
 							</Text>
+
+							{isServiceRequested ? (
+								<>
+									<View style={{ height: 12 }} />
+									<View style={styles.actionsRow}>
+										<Pressable
+											onPress={() => respondToService('cancel')}
+											disabled={!!serviceActionLoading}
+											style={[styles.btn, styles.btnGhost, serviceActionLoading && styles.btnDisabled]}
+										>
+											<Text style={[styles.btnText, styles.btnGhostText]}>
+												{serviceActionLoading === 'cancel' ? 'Rechazando…' : 'Rechazar'}
+											</Text>
+										</Pressable>
+										<Pressable
+											onPress={() => respondToService('accept')}
+											disabled={!!serviceActionLoading}
+											style={[styles.btn, styles.btnPrimary, serviceActionLoading && styles.btnDisabled]}
+										>
+											<Text style={[styles.btnText, styles.btnPrimaryText]}>
+												{serviceActionLoading === 'accept' ? 'Aceptando…' : 'Aceptar'}
+											</Text>
+										</Pressable>
+									</View>
+									{serviceActionError ? (
+										<Text style={styles.inlineError}>{serviceActionError}</Text>
+									) : null}
+								</>
+							) : null}
 						</>
 					) : (
-						<Text style={styles.muted}>No tienes un servicio activo.</Text>
+						<Text style={styles.muted}>No tienes solicitudes por el momento.</Text>
 					)}
 				</View>
 			</View>
-
-			<View style={styles.section}>
-				<Text style={styles.sectionTitle}>2️⃣ Historial del día</Text>
-				<View style={styles.row2}>
-					<View style={styles.statCard}>
-						<Text style={styles.statLabel}>Servicios entregados hoy</Text>
-						<Text style={styles.statValue}>{deliveredToday}</Text>
-					</View>
-					<View style={styles.statCard}>
-						<Text style={styles.statLabel}>Servicios cancelados hoy</Text>
-						<Text style={styles.statValue}>{canceledToday}</Text>
-					</View>
-				</View>
-			</View>
-
-			<View style={styles.section}>
-				<Text style={styles.sectionTitle}>3️⃣ Estado del vehículo</Text>
-				<View style={styles.card}>
-					<View style={styles.vehicleTopRow}>
-						<MaterialIcons name="local-shipping" size={18} color={COLORS.grayText} />
-						<Text style={styles.cardTitle}>Vehículo: {plate}</Text>
-					</View>
-
-					<View style={styles.vehicleStatusRow}>
-						<View style={styles.badge}>
-							<View style={[styles.dot, online ? styles.dotOn : styles.dotOff]} />
-							<Text style={styles.badgeText}>
-								{online == null ? 'Online: —' : online ? 'Online' : 'Offline'}
-							</Text>
-						</View>
-					</View>
-
-					<View style={{ height: 10 }} />
-					<DriverAvailabilityToggle value={available} onChange={(v) => setAvailability(v)} />
-				</View>
-			</View>
-		</View>
+		</SafeAreaView>
 	);
 }
 
@@ -125,12 +232,28 @@ const styles = StyleSheet.create({
 		flex: 1,
 		backgroundColor: COLORS.background,
 		paddingHorizontal: 16,
-		paddingTop: 18,
+		paddingTop: 22,
 		paddingBottom: 100,
 	},
 	header: { marginBottom: 14 },
-	headerOverline: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '800' },
+	headerOverline: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '800', marginTop: 6 },
 	headerTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 20, fontWeight: '900' },
+	titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 },
+	onlineBadge: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 6,
+		borderWidth: 1,
+		borderColor: COLORS.border,
+		backgroundColor: COLORS.white,
+		paddingVertical: 6,
+		paddingHorizontal: 10,
+		borderRadius: 999,
+	},
+	onlineText: { color: COLORS.foreground || COLORS.dark, fontSize: 12, fontWeight: '900' },
+	dot: { width: 8, height: 8, borderRadius: 4 },
+	dotOn: { backgroundColor: COLORS.success },
+	dotOff: { backgroundColor: COLORS.grayText },
 
 	section: { marginBottom: 14 },
 	sectionTitle: { color: COLORS.foreground || COLORS.dark, fontSize: 14, fontWeight: '900', marginBottom: 8 },
@@ -146,6 +269,23 @@ const styles = StyleSheet.create({
 	cardSub: { color: COLORS.mutedForeground || COLORS.grayText, marginTop: 4, fontSize: 13, fontWeight: '700' },
 	muted: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 13, fontWeight: '700' },
 
+	actionsRow: { flexDirection: 'row', gap: 10 },
+	btn: {
+		flex: 1,
+		alignItems: 'center',
+		justifyContent: 'center',
+		paddingVertical: 12,
+		borderRadius: 12,
+		borderWidth: 1,
+	},
+	btnPrimary: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+	btnPrimaryText: { color: COLORS.white },
+	btnGhost: { backgroundColor: COLORS.white, borderColor: COLORS.border },
+	btnGhostText: { color: COLORS.foreground || COLORS.dark },
+	btnDisabled: { opacity: 0.6 },
+	btnText: { fontSize: 14, fontWeight: '900' },
+	inlineError: { marginTop: 10, color: COLORS.danger, fontSize: 13, fontWeight: '800' },
+
 	row2: { flexDirection: 'row', gap: 10 },
 	statCard: {
 		flex: 1,
@@ -155,26 +295,8 @@ const styles = StyleSheet.create({
 		backgroundColor: COLORS.white,
 		padding: 12,
 	},
-	statLabel: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '800' },
+	statLabel: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 12, fontWeight: '900' },
 	statValue: { color: COLORS.foreground || COLORS.dark, fontSize: 20, fontWeight: '900', marginTop: 6 },
-
-	vehicleTopRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
-	vehicleStatusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start' },
-	badge: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 6,
-		borderWidth: 1,
-		borderColor: COLORS.border,
-		borderRadius: 999,
-		paddingVertical: 6,
-		paddingHorizontal: 10,
-		backgroundColor: COLORS.white,
-	},
-	badgeText: { color: COLORS.foreground || COLORS.dark, fontSize: 12, fontWeight: '900' },
-	dot: { width: 8, height: 8, borderRadius: 4 },
-	dotOn: { backgroundColor: COLORS.success },
-	dotOff: { backgroundColor: COLORS.grayText },
 
 	center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: COLORS.background },
 	errorTitle: {

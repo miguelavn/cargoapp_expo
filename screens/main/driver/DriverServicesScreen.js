@@ -1,8 +1,9 @@
-import React, { useMemo } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import { useDriverDashboard } from '../../../hooks/useDriverDashboard';
+import { callEdgeFunction } from '../../../api/edgeFunctions';
 
 function hasPerm(perms = [], needle) {
 	const n = String(needle).toLowerCase();
@@ -16,7 +17,30 @@ export default function DriverServicesScreen() {
 		[permissions]
 	);
 
-	const { loading, error, activeService } = useDriverDashboard(isDriver);
+	const { loading, error, activeService, refetch } = useDriverDashboard(isDriver);
+	const [serviceActionLoading, setServiceActionLoading] = useState('');
+	const [serviceActionError, setServiceActionError] = useState('');
+
+	const isServiceRequested =
+		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+
+	const respondToService = async (action) => {
+		if (!activeService?.service_id) return;
+		setServiceActionError('');
+		setServiceActionLoading(action);
+		try {
+			await callEdgeFunction('driver-service-response', {
+				method: 'POST',
+				body: { service_id: activeService.service_id, action },
+				timeout: 20000,
+			});
+			await refetch({ silent: true });
+		} catch (e) {
+			setServiceActionError(e?.message || 'No se pudo actualizar el servicio');
+		} finally {
+			setServiceActionLoading('');
+		}
+	};
 
 	if (!isDriver) return null;
 
@@ -49,6 +73,35 @@ export default function DriverServicesScreen() {
 							Ruta: {String(activeService.origin_address || activeService.origin || '—')} →{' '}
 							{String(activeService.destination_address || activeService.destination || '—')}
 						</Text>
+
+						{isServiceRequested ? (
+							<>
+								<View style={{ height: 12 }} />
+								<View style={styles.actionsRow}>
+									<Pressable
+										onPress={() => respondToService('cancel')}
+										disabled={!!serviceActionLoading}
+										style={[styles.btn, styles.btnGhost, serviceActionLoading && styles.btnDisabled]}
+									>
+										<Text style={[styles.btnText, styles.btnGhostText]}>
+											{serviceActionLoading === 'cancel' ? 'Rechazando…' : 'Rechazar'}
+										</Text>
+									</Pressable>
+									<Pressable
+										onPress={() => respondToService('accept')}
+										disabled={!!serviceActionLoading}
+										style={[styles.btn, styles.btnPrimary, serviceActionLoading && styles.btnDisabled]}
+									>
+										<Text style={[styles.btnText, styles.btnPrimaryText]}>
+											{serviceActionLoading === 'accept' ? 'Aceptando…' : 'Aceptar'}
+										</Text>
+									</Pressable>
+								</View>
+								{serviceActionError ? (
+									<Text style={styles.inlineError}>{serviceActionError}</Text>
+								) : null}
+							</>
+						) : null}
 					</>
 				) : (
 					<Text style={styles.muted}>No tienes un servicio activo.</Text>
@@ -67,4 +120,21 @@ const styles = StyleSheet.create({
 	cardSub: { color: COLORS.mutedForeground || COLORS.grayText, marginTop: 4, fontSize: 13, fontWeight: '700' },
 	muted: { color: COLORS.mutedForeground || COLORS.grayText, fontSize: 13, fontWeight: '700' },
 	errorText: { color: COLORS.danger, fontSize: 14, fontWeight: '800', textAlign: 'center', paddingHorizontal: 18 },
+
+	actionsRow: { flexDirection: 'row', gap: 10 },
+	btn: {
+		flex: 1,
+		alignItems: 'center',
+		justifyContent: 'center',
+		paddingVertical: 12,
+		borderRadius: 12,
+		borderWidth: 1,
+	},
+	btnPrimary: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+	btnPrimaryText: { color: COLORS.white },
+	btnGhost: { backgroundColor: COLORS.white, borderColor: COLORS.border },
+	btnGhostText: { color: COLORS.foreground || COLORS.dark },
+	btnDisabled: { opacity: 0.6 },
+	btnText: { fontSize: 14, fontWeight: '900' },
+	inlineError: { marginTop: 10, color: COLORS.danger, fontSize: 13, fontWeight: '800' },
 });
