@@ -34,6 +34,10 @@ export function useDriverDashboard(enabled) {
 		return normalizeId(state.vehicle?.vehicle_id ?? state.vehicle?.id);
 	}, [state.vehicle]);
 
+	const driverId = useMemo(() => {
+		return normalizeId(state.vehicle?.driver_id);
+	}, [state.vehicle]);
+
 	const activeServiceId = useMemo(() => {
 		return normalizeId(state.activeService?.service_id);
 	}, [state.activeService]);
@@ -188,6 +192,27 @@ export function useDriverDashboard(enabled) {
 			supabase.removeChannel(channel);
 		};
 	}, [enabled, activeServiceId, refetch]);
+
+	// Realtime: detectar servicios nuevos/actualizados asignados al conductor.
+	// Esto cubre el caso donde NO se actualiza `vehicles.current_service_id` al crear el servicio.
+	useEffect(() => {
+		if (!enabled || !driverId) return;
+
+		const channel = supabase
+			.channel(`driver-dashboard-services-driver-${driverId}`)
+			.on(
+				'postgres_changes',
+				{ event: '*', schema: 'public', table: 'services', filter: `driver_id=eq.${driverId}` },
+				() => {
+					refetch({ silent: true });
+				}
+			)
+			.subscribe();
+
+		return () => {
+			supabase.removeChannel(channel);
+		};
+	}, [enabled, driverId, refetch]);
 
 	const setAvailability = useCallback(
 		async (nextAvailable) => {
