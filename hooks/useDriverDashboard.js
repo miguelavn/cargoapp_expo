@@ -44,13 +44,21 @@ export function useDriverDashboard(enabled) {
 
 	const refetchInFlightRef = useRef(false);
 	const lastRefetchAtRef = useRef(0);
+	const pendingRefetchRef = useRef(false);
+	const pendingSilentRef = useRef(null);
 
-	const refetch = useCallback(async ({ silent = false } = {}) => {
+	const refetch = useCallback(async ({ silent = false, force = false } = {}) => {
 		if (!enabled) return;
-		if (refetchInFlightRef.current) return;
+		if (refetchInFlightRef.current) {
+			pendingRefetchRef.current = true;
+			pendingSilentRef.current = pendingSilentRef.current == null
+				? silent
+				: (pendingSilentRef.current && silent);
+			return;
+		}
 		const now = Date.now();
 		// Evitar ráfagas de refetch por eventos Realtime/heartbeat.
-		if (silent && now - lastRefetchAtRef.current < 1200) return;
+		if (!force && silent && now - lastRefetchAtRef.current < 1200) return;
 		lastRefetchAtRef.current = now;
 		refetchInFlightRef.current = true;
 		setState((s) => ({ ...s, loading: silent ? s.loading : true, error: '' }));
@@ -131,6 +139,17 @@ export function useDriverDashboard(enabled) {
 			}));
 		} finally {
 			refetchInFlightRef.current = false;
+
+			// Si mientras estábamos en vuelo llegó un evento realtime (servicio asignado / vehículo update),
+			// ejecutar un refetch inmediatamente (saltándose el throttle) para reducir latencia percibida.
+			if (pendingRefetchRef.current && enabled) {
+				pendingRefetchRef.current = false;
+				const nextSilent = pendingSilentRef.current == null ? true : pendingSilentRef.current;
+				pendingSilentRef.current = null;
+				setTimeout(() => {
+					refetch({ silent: nextSilent, force: true });
+				}, 0);
+			}
 		}
 	}, [enabled]);
 
