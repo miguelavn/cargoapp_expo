@@ -142,7 +142,11 @@ export default function ServicesListScreen({ navigation, route }) {
 
   const statsReloadTimerRef = useRef(null);
   const statsLastRunAtRef = useRef(0);
-  const STATS_THROTTLE_MS = 1000;
+  const STATS_THROTTLE_MS = 2500;
+
+  const listReloadTimerRef = useRef(null);
+  const listLastRunAtRef = useRef(0);
+  const LIST_THROTTLE_MS = 1200;
 
   const scheduleStatsReload = () => {
     const pid = projectIdRef.current;
@@ -181,6 +185,7 @@ export default function ServicesListScreen({ navigation, route }) {
       const res = await callEdgeFunction('project-vehicles-stats', {
         method: 'GET',
         query: { project_id: projectIdNumber },
+        timeout: 45000,
       });
       const arr = Array.isArray(res?.data) ? res.data : [];
       setProjectStats(arr.length ? arr[0] : null);
@@ -214,14 +219,36 @@ export default function ServicesListScreen({ navigation, route }) {
   // Web parity: refrescar lista con realtime
   useEffect(() => {
     if (statusTab !== 'en_proceso') return;
+
+    const scheduleListReload = () => {
+      const now = Date.now();
+      const elapsed = now - (listLastRunAtRef.current || 0);
+
+      // Si hay un load en curso o se disparó hace muy poco, consolida.
+      if (loadingAnyRef.current || elapsed < LIST_THROTTLE_MS) {
+        if (listReloadTimerRef.current) return;
+        const wait = Math.max(0, LIST_THROTTLE_MS - elapsed);
+        listReloadTimerRef.current = setTimeout(() => {
+          listReloadTimerRef.current = null;
+          listLastRunAtRef.current = Date.now();
+          load(true);
+        }, wait);
+        return;
+      }
+
+      listLastRunAtRef.current = now;
+      load(true);
+    };
+
     const channel = supabase
       .channel('services-list-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, () => {
-        load(true);
+        scheduleListReload();
       })
       .subscribe();
 
     return () => {
+      if (listReloadTimerRef.current) clearTimeout(listReloadTimerRef.current);
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -412,6 +439,7 @@ export default function ServicesListScreen({ navigation, route }) {
       const res = await callEdgeFunction('list-services', {
         method: 'GET',
         query,
+        timeout: 45000,
       });
 
       const arr = Array.isArray(res?.data) ? res.data : [];
@@ -471,6 +499,7 @@ export default function ServicesListScreen({ navigation, route }) {
       await callEdgeFunction('update-service', {
         method: 'POST',
         body: { service_id: Number(serviceId), cancel: true },
+        timeout: 45000,
       });
       Alert.alert('Éxito', 'Servicio cancelado');
       await load(true);
