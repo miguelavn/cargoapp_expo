@@ -1,10 +1,19 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { callEdgeFunction } from '../api/edgeFunctions';
 
-export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 20000 }) {
+export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 20000, onSuccess } = {}) {
 	const intervalRef = useRef(null);
 	const inFlightRef = useRef(false);
+	const [lastSuccessAt, setLastSuccessAt] = useState(0);
+	const mountedRef = useRef(true);
+
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
 
 	useEffect(() => {
 		const stop = () => {
@@ -22,6 +31,12 @@ export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 2
 			inFlightRef.current = true;
 			try {
 				await callEdgeFunction('driver-heartbeat', { method: 'POST', timeout: timeoutMs });
+				if (mountedRef.current) setLastSuccessAt(Date.now());
+				try {
+					onSuccess?.();
+				} catch {
+					// ignore
+				}
 			} catch (e) {
 				// eslint-disable-next-line no-console
 				console.warn('[heartbeat] Error llamando driver-heartbeat', e?.message || e);
@@ -51,4 +66,6 @@ export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 2
 			sub.remove();
 		};
 	}, [enabled, intervalMs, timeoutMs]);
+
+	return { lastSuccessAt };
 }

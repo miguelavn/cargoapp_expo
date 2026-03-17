@@ -82,9 +82,21 @@ export default function DriverHomeScreen() {
 	const alertSoundLoadingRef = useRef(false);
 	const insets = useSafeAreaInsets();
 	const isConnected = useIsOnline();
+	const heartbeatRefetchCooldownRef = useRef(0);
 
 	const heartbeatEnabled = isDriver && vehicle?.is_active === true;
-	useVehicleHeartbeat({ enabled: heartbeatEnabled });
+	const { lastSuccessAt: lastHeartbeatSuccessAt } = useVehicleHeartbeat({
+		enabled: heartbeatEnabled,
+		onSuccess: () => {
+			// Si aún no se ve online en el estado local, forzar un refetch silencioso.
+			// Esto ayuda al primer ingreso del día cuando el backend actualiza `online` unos ms después.
+			if (!vehicle || vehicle?.online === true) return;
+			const now = Date.now();
+			if (now - (heartbeatRefetchCooldownRef.current || 0) < 15000) return;
+			heartbeatRefetchCooldownRef.current = now;
+			refetch?.({ silent: true });
+		},
+	});
 
 	const playAlert = async () => {
 		try {
@@ -160,7 +172,10 @@ export default function DriverHomeScreen() {
 		? `${vehicle.capacity_m3} m³`
 		: '—';
 	const available = !!vehicle?.is_available;
-	const realOnline = isConnected && vehicle?.online === true;
+	const optimisticWindowMs = 35000;
+	const heartbeatJustWorked =
+		!!lastHeartbeatSuccessAt && Date.now() - lastHeartbeatSuccessAt < optimisticWindowMs;
+	const realOnline = isConnected && (vehicle?.online === true || (heartbeatEnabled && heartbeatJustWorked));
 	const isServiceRequested =
 		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
 	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
