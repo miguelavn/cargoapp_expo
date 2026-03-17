@@ -44,6 +44,21 @@ function formatDateEs(dateStr) {
   }
 }
 
+function mergeUniqueServices(prev = [], next = []) {
+  const map = new Map();
+  (prev || []).forEach((s) => {
+    const k = s?.service_id;
+    if (k == null) return;
+    map.set(String(k), s);
+  });
+  (next || []).forEach((s) => {
+    const k = s?.service_id;
+    if (k == null) return;
+    map.set(String(k), s);
+  });
+  return Array.from(map.values());
+}
+
 export default function ServicesListScreen({ navigation, route }) {
   const { width: screenWidth } = useWindowDimensions();
 
@@ -79,6 +94,19 @@ export default function ServicesListScreen({ navigation, route }) {
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [cancellingId, setCancellingId] = useState(null);
+
+  const offsetRef = useRef(0);
+  const hasMoreRef = useRef(true);
+  const loadingAnyRef = useRef(false);
+  const loadSeqRef = useRef(0);
+
+  useEffect(() => {
+    offsetRef.current = offset;
+  }, [offset]);
+
+  useEffect(() => {
+    hasMoreRef.current = hasMore;
+  }, [hasMore]);
 
   const [searchText, setSearchText] = useState('');
   const [onlyToday, setOnlyToday] = useState(false);
@@ -348,21 +376,29 @@ export default function ServicesListScreen({ navigation, route }) {
   }, [projectId]);
 
   const load = async (reset = true) => {
+    const seq = ++loadSeqRef.current;
     try {
-
       if (reset) {
+        loadingAnyRef.current = true;
         setLoading(true);
         setOffset(0);
+        offsetRef.current = 0;
         setHasMore(true);
+        hasMoreRef.current = true;
       } else {
-        if (!hasMore) return;
+        if (loadingAnyRef.current || loading || loadingMore) return;
+        if (!hasMoreRef.current) return;
+        loadingAnyRef.current = true;
         setLoadingMore(true);
       }
 
+      const limit = 10;
+      const currentOffset = reset ? 0 : (offsetRef.current || 0);
+
       const query = {
         project_id: projectId ? Number(projectId) : undefined,
-        limit: 10,
-        offset: reset ? 0 : offset,
+        limit,
+        offset: currentOffset,
       };
 
       if (statusTab === 'entregado') {
@@ -379,6 +415,7 @@ export default function ServicesListScreen({ navigation, route }) {
       });
 
       const arr = Array.isArray(res?.data) ? res.data : [];
+      if (loadSeqRef.current !== seq) return;
 
       const norm = arr.map((it) => {
         const originAddress = typeof it?.origin_address === 'object'
@@ -406,23 +443,25 @@ export default function ServicesListScreen({ navigation, route }) {
         };
       });
 
-      if (reset) {
-        setServices(norm);
-      } else {
-        setServices((prev) => [...prev, ...norm]);
-      }
+      setServices((prev) => (reset ? mergeUniqueServices([], norm) : mergeUniqueServices(prev, norm)));
 
-      if (arr.length < 10) {
-        setHasMore(false);
-      }
+      const got = arr.length;
+      const nextHasMore = got >= limit;
+      setHasMore(nextHasMore);
+      hasMoreRef.current = nextHasMore;
 
-      setOffset((prev) => (reset ? 10 : prev + 10));
+      const nextOffset = currentOffset + got;
+      setOffset(nextOffset);
+      offsetRef.current = nextOffset;
 
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudieron cargar los servicios');
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
+      if (loadSeqRef.current === seq) {
+        loadingAnyRef.current = false;
+        setLoading(false);
+        setLoadingMore(false);
+      }
     }
   };
 
@@ -443,6 +482,153 @@ export default function ServicesListScreen({ navigation, route }) {
   };
 
   const headerTop = Platform.OS === 'ios' ? insets.top : insets.top + 8;
+
+  const renderServiceItem = React.useCallback(({ item }) => (
+    <TouchableOpacity
+      style={styles.serviceCard}
+      onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId, statusName: item.status_name, statusId: item.status_id })}
+      onLongPress={() => {
+        const statusUpper = String(item.status_name || '').toUpperCase();
+        const canCancel = canUpdate && ['CREATED', 'ACCEPTED'].includes(statusUpper);
+
+        const buttons = [
+          { text: 'Cerrar', style: 'cancel' },
+          { text: 'Editar', onPress: () => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId, statusName: item.status_name, statusId: item.status_id }) },
+        ];
+        if (canCancel) {
+          buttons.push({
+            text: cancellingId === item.service_id ? 'Cancelando…' : 'Cancelar servicio',
+            style: 'destructive',
+            onPress: () => {
+              Alert.alert('Confirmar', '¿Cancelar este servicio?', [
+                { text: 'No', style: 'cancel' },
+                { text: 'Sí, cancelar', style: 'destructive', onPress: () => cancelService(item.service_id) },
+              ]);
+            },
+          });
+        }
+
+        Alert.alert('Acciones', `Servicio #${item.service_id}`, buttons);
+      }}
+      delayLongPress={250}
+    >
+      {(() => {
+        const originText = item?.origin_address || item?.origin || '';
+        const destinationText = item?.destination_address || item?.destination || '';
+        const routeText = originText && destinationText
+          ? `${originText} → ${destinationText}`
+          : (originText || destinationText || 'Sin ruta');
+        const v = item?.vehicle;
+        const vehiclePlate = v ? String(v?.plate || '').trim() : '';
+        const vehicleCap = v && v?.capacity_m3 != null ? Number(v.capacity_m3) : null;
+        const vehicleOnline = !!(v && v?.online);
+
+        const materialName = item?.material
+          ? (typeof item.material === 'object' ? (item.material?.name ?? '') : String(item.material))
+          : '';
+        const unitName = item?.unit
+          ? (typeof item.unit === 'object' ? (item.unit?.name ?? '') : String(item.unit))
+          : '';
+        const qty = item?.quantity != null && String(item.quantity) !== '' ? String(item.quantity) : '';
+
+        const statusName = String(item?.status_name || 'CREATED');
+        const stVariant = statusVariant(statusName);
+        const active = isServiceActive(statusName);
+        const sub = item?.substatus_name ? String(item.substatus_name) : '';
+        const pauseReason = item?.pause_reason_name ? String(item.pause_reason_name) : '';
+
+        return (
+          <>
+            <View style={styles.serviceTopRow}>
+              <View style={styles.serviceLeftIcon}>
+                <MaterialIcons name="build" size={16} color={COLORS.grayText} />
+                {!!(v && active) && (
+                  <View
+                    style={[
+                      styles.serviceOnlineDot,
+                      { backgroundColor: vehicleOnline ? COLORS.success : COLORS.grayText },
+                    ]}
+                  />
+                )}
+              </View>
+              <View style={{ flex: 1 }}>
+                <View style={styles.serviceTitleRow}>
+                  <Text style={styles.serviceTitle} numberOfLines={1}>Servicio #{item.service_id}</Text>
+                  <Text style={styles.serviceDate} numberOfLines={1}>{formatDateEs(item.created_at)}</Text>
+                </View>
+
+                {!!v && (
+                  <View style={styles.serviceLine}>
+                    <MaterialIcons name="local-shipping" size={14} color={COLORS.grayText} />
+                    <Text style={styles.serviceLineText} numberOfLines={1}>
+                      {vehiclePlate ? vehiclePlate : 'Vehículo'}{vehicleCap ? ` · ${vehicleCap}m³` : ''}
+                    </Text>
+                  </View>
+                )}
+
+                {!!materialName && (
+                  <View style={styles.serviceLine}>
+                    <MaterialIcons name="inventory-2" size={14} color={COLORS.grayText} />
+                    <Text style={styles.serviceLineText} numberOfLines={1}>
+                      {materialName}{qty && unitName ? ` (${qty} ${unitName})` : (qty ? ` (${qty})` : '')}
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.serviceLine}>
+                  <MaterialIcons name="map" size={14} color={COLORS.grayText} />
+                  <Text style={styles.serviceLineText} numberOfLines={1}>{routeText}</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.serviceChipsRow}>
+              {!!(item.project_name) && (
+                <View style={styles.badgeOutline}>
+                  <Text style={styles.badgeOutlineText} numberOfLines={1}>{String(item.project_name)}</Text>
+                </View>
+              )}
+
+              <View
+                style={[
+                  styles.badge,
+                  stVariant === 'in_progress' && styles.badgePrimary,
+                  stVariant === 'completed' && styles.badgeSuccess,
+                  stVariant === 'cancelled' && styles.badgeDanger,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.badgeText,
+                    stVariant === 'in_progress' && styles.badgeTextPrimary,
+                    stVariant === 'completed' && styles.badgeTextSuccess,
+                    stVariant === 'cancelled' && styles.badgeTextDanger,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {statusName}
+                </Text>
+              </View>
+
+              {sub === 'ACTIVED' && (
+                <View style={styles.badgeOutlineSuccess}>
+                  <Text style={styles.badgeOutlineSuccessText} numberOfLines={1}>ACTIVED</Text>
+                </View>
+              )}
+
+              {!!sub && sub !== 'ACTIVED' && (
+                <View style={styles.badgeDangerSoft}>
+                  <Text style={styles.badgeDangerSoftText} numberOfLines={1}>
+                    {sub}{pauseReason ? ` · ${pauseReason}` : ''}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </>
+        );
+      })()}
+    </TouchableOpacity>
+  ), [navigation, projectId, canUpdate, cancellingId]);
 
   return (
     <View style={styles.screen}>
@@ -518,17 +704,18 @@ export default function ServicesListScreen({ navigation, route }) {
               </View>
 
               <FlatList
-                data={[{ id: '', name: 'Todos los proyectos', status: true }, ...filteredProjects]}
+                data={[{ id: '__ALL__', name: 'Todos los proyectos', status: true }, ...filteredProjects]}
                 keyExtractor={(it) => String(it.id)}
                 keyboardShouldPersistTaps="handled"
                 renderItem={({ item }) => {
-                  const selected = String(projectId) === String(item.id);
+                  const resolvedId = item.id === '__ALL__' ? '' : String(item.id);
+                  const selected = String(projectId) === String(resolvedId);
                   return (
                     <TouchableOpacity
                       style={[styles.projectListItem, selected && styles.projectListItemActive]}
                       activeOpacity={0.85}
                       onPress={() => {
-                        setProjectId(String(item.id || ''));
+                        setProjectId(resolvedId);
                         setFiltersOpen(false);
                       }}
                     >
@@ -673,152 +860,7 @@ export default function ServicesListScreen({ navigation, route }) {
         <FlatList
           data={services}
           keyExtractor={(it) => String(it.service_id)}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.serviceCard}
-              onPress={() => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId, statusName: item.status_name, statusId: item.status_id })}
-              onLongPress={() => {
-                const statusUpper = String(item.status_name || '').toUpperCase();
-                const canCancel = canUpdate && ['CREATED', 'ACCEPTED'].includes(statusUpper);
-
-                const buttons = [
-                  { text: 'Cerrar', style: 'cancel' },
-                  { text: 'Editar', onPress: () => navigation.navigate('RegisterService', { serviceId: item.service_id, projectId, statusName: item.status_name, statusId: item.status_id }) },
-                ];
-                if (canCancel) {
-                  buttons.push({
-                    text: cancellingId === item.service_id ? 'Cancelando…' : 'Cancelar servicio',
-                    style: 'destructive',
-                    onPress: () => {
-                      Alert.alert('Confirmar', '¿Cancelar este servicio?', [
-                        { text: 'No', style: 'cancel' },
-                        { text: 'Sí, cancelar', style: 'destructive', onPress: () => cancelService(item.service_id) },
-                      ]);
-                    },
-                  });
-                }
-
-                Alert.alert('Acciones', `Servicio #${item.service_id}`, buttons);
-              }}
-              delayLongPress={250}
-            >
-              {(() => {
-                const originText = item?.origin_address || item?.origin || '';
-                const destinationText = item?.destination_address || item?.destination || '';
-                const routeText = originText && destinationText
-                  ? `${originText} → ${destinationText}`
-                  : (originText || destinationText || 'Sin ruta');
-                const v = item?.vehicle;
-                const vehiclePlate = v ? String(v?.plate || '').trim() : '';
-                const vehicleCap = v && v?.capacity_m3 != null ? Number(v.capacity_m3) : null;
-                const vehicleOnline = !!(v && v?.online);
-
-                const materialName = item?.material
-                  ? (typeof item.material === 'object' ? (item.material?.name ?? '') : String(item.material))
-                  : '';
-                const unitName = item?.unit
-                  ? (typeof item.unit === 'object' ? (item.unit?.name ?? '') : String(item.unit))
-                  : '';
-                const qty = item?.quantity != null && String(item.quantity) !== '' ? String(item.quantity) : '';
-
-                const statusName = String(item?.status_name || 'CREATED');
-                const stVariant = statusVariant(statusName);
-                const active = isServiceActive(statusName);
-                const sub = item?.substatus_name ? String(item.substatus_name) : '';
-                const pauseReason = item?.pause_reason_name ? String(item.pause_reason_name) : '';
-
-                return (
-                  <>
-                    <View style={styles.serviceTopRow}>
-                      <View style={styles.serviceLeftIcon}>
-                        <MaterialIcons name="build" size={16} color={COLORS.grayText} />
-                        {!!(v && active) && (
-                          <View
-                            style={[
-                              styles.serviceOnlineDot,
-                              { backgroundColor: vehicleOnline ? COLORS.success : COLORS.grayText },
-                            ]}
-                          />
-                        )}
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <View style={styles.serviceTitleRow}>
-                          <Text style={styles.serviceTitle} numberOfLines={1}>Servicio #{item.service_id}</Text>
-                          <Text style={styles.serviceDate} numberOfLines={1}>{formatDateEs(item.created_at)}</Text>
-                        </View>
-
-                        {!!v && (
-                          <View style={styles.serviceLine}>
-                            <MaterialIcons name="local-shipping" size={14} color={COLORS.grayText} />
-                            <Text style={styles.serviceLineText} numberOfLines={1}>
-                              {vehiclePlate ? vehiclePlate : 'Vehículo'}{vehicleCap ? ` · ${vehicleCap}m³` : ''}
-                            </Text>
-                          </View>
-                        )}
-
-                        {!!materialName && (
-                          <View style={styles.serviceLine}>
-                            <MaterialIcons name="inventory-2" size={14} color={COLORS.grayText} />
-                            <Text style={styles.serviceLineText} numberOfLines={1}>
-                              {materialName}{qty && unitName ? ` (${qty} ${unitName})` : (qty ? ` (${qty})` : '')}
-                            </Text>
-                          </View>
-                        )}
-
-                        <View style={styles.serviceLine}>
-                          <MaterialIcons name="map" size={14} color={COLORS.grayText} />
-                          <Text style={styles.serviceLineText} numberOfLines={1}>{routeText}</Text>
-                        </View>
-                      </View>
-                    </View>
-
-                    <View style={styles.serviceChipsRow}>
-                      {!!(item.project_name) && (
-                        <View style={styles.badgeOutline}>
-                          <Text style={styles.badgeOutlineText} numberOfLines={1}>{String(item.project_name)}</Text>
-                        </View>
-                      )}
-
-                      <View
-                        style={[
-                          styles.badge,
-                          stVariant === 'in_progress' && styles.badgePrimary,
-                          stVariant === 'completed' && styles.badgeSuccess,
-                          stVariant === 'cancelled' && styles.badgeDanger,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.badgeText,
-                            stVariant === 'in_progress' && styles.badgeTextPrimary,
-                            stVariant === 'completed' && styles.badgeTextSuccess,
-                            stVariant === 'cancelled' && styles.badgeTextDanger,
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {statusName}
-                        </Text>
-                      </View>
-
-                      {sub === 'ACTIVED' && (
-                        <View style={styles.badgeOutlineSuccess}>
-                          <Text style={styles.badgeOutlineSuccessText} numberOfLines={1}>ACTIVED</Text>
-                        </View>
-                      )}
-
-                      {!!sub && sub !== 'ACTIVED' && (
-                        <View style={styles.badgeDangerSoft}>
-                          <Text style={styles.badgeDangerSoftText} numberOfLines={1}>
-                            {sub}{pauseReason ? ` · ${pauseReason}` : ''}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                  </>
-                );
-              })()}
-            </TouchableOpacity>
-          )}
+          renderItem={renderServiceItem}
           ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
           ListEmptyComponent={
             <Text style={{ color: COLORS.grayText, marginTop: 20 }}>
@@ -829,6 +871,10 @@ export default function ServicesListScreen({ navigation, route }) {
           onRefresh={() => load(true)}
           onEndReached={() => load(false)}
           onEndReachedThreshold={0.5}
+          removeClippedSubviews
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          windowSize={7}
           ListFooterComponent={
             loadingMore ? <ActivityIndicator color={COLORS.primary} style={{ marginVertical: 12 }} /> : null
           }
