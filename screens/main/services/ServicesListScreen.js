@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, useWindowDimensions, TextInput, Switch, Modal, Pressable } from 'react-native';
+import { ActivityIndicator, View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, useWindowDimensions, TextInput, Switch, Modal, Pressable } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../../supabaseClient';
@@ -75,6 +75,9 @@ export default function ServicesListScreen({ navigation, route }) {
   const [services, setServices] = useState([]);
   const [statusTab, setStatusTab] = useState('en_proceso');
   const [loading, setLoading] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [cancellingId, setCancellingId] = useState(null);
 
   const [searchText, setSearchText] = useState('');
@@ -159,69 +162,6 @@ export default function ServicesListScreen({ navigation, route }) {
     }
   };
 
-  const statusKey = (name) => String(name || '').toLowerCase().replace(/\s+/g, '_');
-
-  const isEnProceso = (s) => {
-    const sid = Number(s?.status_id);
-    if (!Number.isNaN(sid) && [1, 2, 3].includes(sid)) return true;
-    const k = statusKey(s?.status_name);
-    return ['created', 'accepted', 'loaded', 'in_progress', 'en_proceso'].includes(k);
-  };
-
-  const isEntregado = (s) => {
-    const sid = Number(s?.status_id);
-    if (!Number.isNaN(sid) && sid === 4) return true;
-    const k = statusKey(s?.status_name);
-    return ['completed', 'entregado', 'delivered'].includes(k);
-  };
-
-  const isCancelado = (s) => {
-    const sid = Number(s?.status_id);
-    if (!Number.isNaN(sid) && sid === 5) return true;
-    const k = statusKey(s?.status_name);
-    return ['cancelled', 'canceled', 'cancelado'].includes(k);
-  };
-
-  const filteredServices = useMemo(() => {
-    let rows = services;
-    if (statusTab === 'en_proceso') rows = rows.filter(isEnProceso);
-    if (statusTab === 'entregado') rows = rows.filter(isEntregado);
-    if (statusTab === 'cancelado') rows = rows.filter(isCancelado);
-
-    const q = String(searchText || '').trim().toLowerCase();
-    if (q) {
-      rows = rows.filter((s) => {
-        const hay = [
-          s?.service_id,
-          s?.project_name,
-          s?.origin,
-          s?.destination,
-          s?.status_name,
-        ]
-          .filter(Boolean)
-          .map((v) => String(v).toLowerCase())
-          .join(' ');
-        return hay.includes(q);
-      });
-    }
-
-    if (onlyToday) {
-      rows = rows.filter((s) => {
-        const k = s?.created_at ? String(s.created_at).slice(0, 10) : '';
-        return k === todayKey;
-      });
-    }
-
-    return rows;
-  }, [services, statusTab, searchText, onlyToday, todayKey]);
-
-  const countByTab = useMemo(() => {
-    const enProceso = services.filter(isEnProceso).length;
-    const entregado = services.filter(isEntregado).length;
-    const cancelado = services.filter(isCancelado).length;
-    return { enProceso, entregado, cancelado };
-  }, [services]);
-
   useEffect(() => {
     (async () => {
       try {
@@ -239,16 +179,16 @@ export default function ServicesListScreen({ navigation, route }) {
           setProjects((pjs || []).map((p) => ({ id: String(p.project_id), name: p.name, status: normalizeProjectStatus(p.status) })));
         }
       } catch {}
-      await load();
     })();
   }, []);
 
   // Web parity: refrescar lista con realtime
   useEffect(() => {
+    if (statusTab !== 'en_proceso') return;
     const channel = supabase
       .channel('services-list-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'services' }, () => {
-        load();
+        load(true);
       })
       .subscribe();
 
@@ -256,7 +196,7 @@ export default function ServicesListScreen({ navigation, route }) {
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, statusTab]);
 
   // Web parity (Services.tsx): estadísticas en tiempo real escuchando 5 tablas.
   // services: cambia estado (En Proceso/Entregados/Cancelados)
@@ -391,16 +331,10 @@ export default function ServicesListScreen({ navigation, route }) {
     };
   }, [services]);
 
-  // Recarga cuando cambie el filtro de proyecto o se regrese con refresh
   useEffect(() => {
-    load();
+    load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, route?.params?.refresh]);
-
-  // Reset a En Proceso cuando cambia el proyecto (paridad con web)
-  useEffect(() => {
-    setStatusTab('en_proceso');
-  }, [projectId]);
+  }, [statusTab, projectId, route?.params?.refresh]);
 
   // Cargar métricas cuando se seleccione proyecto
   useEffect(() => {
@@ -412,84 +346,71 @@ export default function ServicesListScreen({ navigation, route }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const load = async () => {
+  const load = async (reset = true) => {
     try {
-      setLoading(true);
-      // Si hay edge function para listar servicios, úsala; sino, consulta directa (asumiendo RLS)
-      try {
-        const q = {};
-        if (projectId) q.project_id = Number(projectId);
-        const res = await callEdgeFunction('list-services', { method: 'GET', query: q });
-        const arr = Array.isArray(res?.data) ? res.data : [];
-        // Normalizar campos a nuestro render (paridad con cargoapp-next-main)
-        const norm = arr.map((it) => {
-          const originAddress = typeof it.origin_address === 'object'
-            ? (it.origin_address?.address ?? null)
-            : (it.origin_address ?? it.origin ?? null);
-          const destinationAddress = typeof it.destination_address === 'object'
-            ? (it.destination_address?.address ?? null)
-            : (it.destination_address ?? it.destination ?? null);
 
-          const rawVehicle = it.vehicle ?? null;
-          const rawVehicleId = it.vehicle_id ?? it.vehicleId ?? rawVehicle?.vehicle_id ?? rawVehicle?.id ?? null;
-          const normalizedVehicle = rawVehicle && typeof rawVehicle === 'object'
-            ? rawVehicle
-            : (rawVehicleId != null ? { id: rawVehicleId, vehicle_id: rawVehicleId, online: null } : null);
-
-          return {
-            service_id: it.service_id ?? it.id,
-            order_id: it.order_id ?? it.orderId ?? null,
-            project_id: it.project_id ?? null,
-            project_name: it.project_name ?? it?.project?.name ?? null,
-
-            vehicle_id: rawVehicleId,
-
-            vehicle: normalizedVehicle,
-            driver: it.driver ?? null,
-            material: it.material ?? null,
-            quantity: it.quantity ?? null,
-            unit: it.unit ?? null,
-
-            status_name: it.status_name ?? it.status ?? 'CREATED',
-            status_id: it.status_id ?? null,
-            substatus_id: it.substatus_id ?? null,
-            substatus_name: it.substatus_name ?? null,
-            pause_reason_id: it.pause_reason_id ?? null,
-            pause_reason_name: it.pause_reason_name ?? null,
-
-            created_at: it.created_at ?? it.date ?? null,
-            origin: it.origin_address?.id ?? it.origin ?? null,
-            destination: it.destination_address?.id ?? it.destination ?? null,
-            origin_address: originAddress,
-            destination_address: destinationAddress,
-          };
-        });
-        setServices(norm);
-      } catch {
-        // Fallback directo: unir con orders para filtrar por proyecto
-        let qb = supabase
-          .from('services')
-          .select('service_id, created_at, origin, destination, order_id, orders!inner(project_id)')
-          .order('service_id', { ascending: false });
-        if (projectId) qb = qb.eq('orders.project_id', Number(projectId));
-        const { data } = await qb;
-        const norm = (data || []).map((it) => ({
-          service_id: it.service_id,
-          created_at: it.created_at,
-          order_id: it.order_id,
-          project_name: null,
-          origin: it.origin ?? null,
-          destination: it.destination ?? null,
-          status_name: null,
-          status_id: null,
-        }));
-        setServices(norm);
+      if (reset) {
+        setLoading(true);
+        setOffset(0);
+        setHasMore(true);
+      } else {
+        if (!hasMore) return;
+        setLoadingMore(true);
       }
+
+      const query = {
+        project_id: projectId ? Number(projectId) : undefined,
+        limit: 10,
+        offset: reset ? 0 : offset,
+      };
+
+      if (statusTab === 'entregado') {
+        query.status = 'DELIVERED';
+      }
+
+      if (statusTab === 'cancelado') {
+        query.status = 'CANCELED';
+      }
+
+      const res = await callEdgeFunction('list-services', {
+        method: 'GET',
+        query,
+      });
+
+      const arr = Array.isArray(res?.data) ? res.data : [];
+
+      const norm = arr.map((it) => ({
+        service_id: it.service_id,
+        project_name: it.project_name,
+        vehicle: it.vehicle,
+        driver: it.driver,
+        material: it.material,
+        quantity: it.quantity,
+        unit: it.unit,
+        status_name: it.status_name,
+        status_id: it.status_id,
+        created_at: it.created_at,
+        origin_address: it.origin_address,
+        destination_address: it.destination_address,
+      }));
+
+      if (reset) {
+        setServices(norm);
+      } else {
+        setServices((prev) => [...prev, ...norm]);
+      }
+
+      if (arr.length < 10) {
+        setHasMore(false);
+      }
+
+      setOffset((prev) => (reset ? 10 : prev + 10));
 
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudieron cargar los servicios');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   };
 
@@ -501,7 +422,7 @@ export default function ServicesListScreen({ navigation, route }) {
         body: { service_id: Number(serviceId), cancel: true },
       });
       Alert.alert('Éxito', 'Servicio cancelado');
-      await load();
+      await load(true);
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudo cancelar el servicio');
     } finally {
@@ -717,9 +638,9 @@ export default function ServicesListScreen({ navigation, route }) {
 
         <View style={styles.tabsRow}>
           {[
-            { key: 'en_proceso', label: 'En Proceso', count: countByTab.enProceso },
-            { key: 'entregado', label: 'Entregado', count: countByTab.entregado },
-            { key: 'cancelado', label: 'Cancelado', count: countByTab.cancelado },
+            { key: 'en_proceso', label: 'En Proceso' },
+            { key: 'entregado', label: 'Entregado' },
+            { key: 'cancelado', label: 'Cancelado' },
           ].map((t) => {
             const active = statusTab === t.key;
             return (
@@ -730,7 +651,7 @@ export default function ServicesListScreen({ navigation, route }) {
                 style={[styles.tabBtn, active && styles.tabBtnActive]}
               >
                 <Text style={[styles.tabText, active && styles.tabTextActive]}>
-                  {t.label} {t.count}
+                  {t.label}
                 </Text>
               </TouchableOpacity>
             );
@@ -738,7 +659,7 @@ export default function ServicesListScreen({ navigation, route }) {
         </View>
 
         <FlatList
-          data={filteredServices}
+          data={services}
           keyExtractor={(it) => String(it.service_id)}
           renderItem={({ item }) => (
             <TouchableOpacity
@@ -893,7 +814,12 @@ export default function ServicesListScreen({ navigation, route }) {
             </Text>
           }
           refreshing={loading}
-          onRefresh={load}
+          onRefresh={() => load(true)}
+          onEndReached={() => load(false)}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={
+            loadingMore ? <ActivityIndicator color={COLORS.primary} style={{ marginVertical: 12 }} /> : null
+          }
           contentContainerStyle={{ paddingTop: 12, paddingBottom: 40 }}
         />
       </View>
