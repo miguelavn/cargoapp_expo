@@ -98,6 +98,7 @@ export default function ServicesListScreen({ navigation, route }) {
   const offsetRef = useRef(0);
   const hasMoreRef = useRef(true);
   const loadingAnyRef = useRef(false);
+  const inFlightRef = useRef({ reset: 0, more: 0 });
   const loadSeqRef = useRef(0);
 
   useEffect(() => {
@@ -404,9 +405,11 @@ export default function ServicesListScreen({ navigation, route }) {
 
   const load = async (reset = true) => {
     const seq = ++loadSeqRef.current;
+    const type = reset ? 'reset' : 'more';
     try {
       if (reset) {
-        loadingAnyRef.current = true;
+        inFlightRef.current.reset += 1;
+        loadingAnyRef.current = (inFlightRef.current.reset + inFlightRef.current.more) > 0;
         setLoading(true);
         setOffset(0);
         offsetRef.current = 0;
@@ -415,7 +418,8 @@ export default function ServicesListScreen({ navigation, route }) {
       } else {
         if (loadingAnyRef.current || loading || loadingMore) return;
         if (!hasMoreRef.current) return;
-        loadingAnyRef.current = true;
+        inFlightRef.current.more += 1;
+        loadingAnyRef.current = (inFlightRef.current.reset + inFlightRef.current.more) > 0;
         setLoadingMore(true);
       }
 
@@ -485,11 +489,15 @@ export default function ServicesListScreen({ navigation, route }) {
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudieron cargar los servicios');
     } finally {
-      if (loadSeqRef.current === seq) {
-        loadingAnyRef.current = false;
-        setLoading(false);
-        setLoadingMore(false);
+      if (type === 'reset') {
+        inFlightRef.current.reset = Math.max(0, inFlightRef.current.reset - 1);
+      } else {
+        inFlightRef.current.more = Math.max(0, inFlightRef.current.more - 1);
       }
+
+      loadingAnyRef.current = (inFlightRef.current.reset + inFlightRef.current.more) > 0;
+      if (inFlightRef.current.reset === 0) setLoading(false);
+      if (inFlightRef.current.more === 0) setLoadingMore(false);
     }
   };
 
