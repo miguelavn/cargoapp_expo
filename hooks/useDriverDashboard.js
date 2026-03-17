@@ -7,10 +7,24 @@ function normalizeId(val) {
 	return String(val);
 }
 
+const TERMINAL_STATUS_IDS = new Set([4, 5]); // DELIVERED, CANCELED
 const TERMINAL_SERVICE_STATUSES = new Set(['DELIVERED', 'CANCELED']);
 
-function isTerminalService(statusName) {
-	return TERMINAL_SERVICE_STATUSES.has(String(statusName || '').toUpperCase());
+function normalizeStatusNameFromRow(row) {
+	const raw = row?.status_name ?? row?.status;
+	if (raw != null && String(raw).trim()) return String(raw).toUpperCase();
+	const sid = Number(row?.status_id);
+	if (sid === 1) return 'CREATED';
+	if (sid === 4) return 'DELIVERED';
+	if (sid === 5) return 'CANCELED';
+	return '';
+}
+
+function isTerminalServiceRow(row) {
+	const sid = Number(row?.status_id);
+	if (!Number.isNaN(sid) && TERMINAL_STATUS_IDS.has(sid)) return true;
+	const name = normalizeStatusNameFromRow(row);
+	return TERMINAL_SERVICE_STATUSES.has(name);
 }
 
 export function useDriverDashboard(enabled) {
@@ -228,11 +242,11 @@ export function useDriverDashboard(enabled) {
 			if (!row) return;
 			const serviceId = normalizeId(row?.service_id ?? row?.id);
 			if (!serviceId) return;
+			const normalizedStatusName = normalizeStatusNameFromRow(row);
 
 			setState((s) => {
 				const prevActiveId = normalizeId(s?.activeService?.service_id ?? s?.activeService?.id);
-				const nextStatusName = String(row?.status_name || row?.status || '').toUpperCase();
-				const isTerminal = isTerminalService(nextStatusName);
+				const isTerminal = isTerminalServiceRow(row);
 
 				// Si el servicio actual se volvió terminal, limpiarlo.
 				if (isTerminal && prevActiveId && prevActiveId === serviceId) {
@@ -242,8 +256,8 @@ export function useDriverDashboard(enabled) {
 				// Si llega un servicio no-terminal asignado, mostrarlo inmediatamente.
 				if (!isTerminal) {
 					const merged = s.activeService && prevActiveId === serviceId
-						? { ...s.activeService, ...row, service_id: row?.service_id ?? s.activeService?.service_id }
-						: { ...row, service_id: row?.service_id ?? serviceId };
+						? { ...s.activeService, ...row, status_name: normalizedStatusName || s.activeService?.status_name, service_id: row?.service_id ?? s.activeService?.service_id }
+						: { ...row, status_name: normalizedStatusName, service_id: row?.service_id ?? serviceId };
 					return { ...s, activeService: merged };
 				}
 

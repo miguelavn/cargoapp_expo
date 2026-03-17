@@ -136,7 +136,9 @@ export default function DriverHomeScreen() {
 
 	useEffect(() => {
 		if (!activeService) return;
-		const isCreated = String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+		const isCreated =
+			String(activeService?.status_name || '').toUpperCase() === 'CREATED' ||
+			Number(activeService?.status_id) === 1;
 		const serviceId = activeService?.service_id;
 		const isNewService = !!serviceId && serviceId !== lastServiceIdRef.current;
 		if (isCreated && isNewService) {
@@ -177,10 +179,14 @@ export default function DriverHomeScreen() {
 		!!lastHeartbeatSuccessAt && Date.now() - lastHeartbeatSuccessAt < optimisticWindowMs;
 	const realOnline = isConnected && (vehicle?.online === true || (heartbeatEnabled && heartbeatJustWorked));
 	const isServiceRequested =
-		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+		!!activeService && (
+			String(activeService?.status_name || '').toUpperCase() === 'CREATED' ||
+			Number(activeService?.status_id) === 1
+		);
 	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
-	const hasNonTerminalActiveService =
-		!!activeService && statusNameUpper !== 'CANCELED' && statusNameUpper !== 'DELIVERED';
+	const statusIdNumber = Number(activeService?.status_id);
+	const isTerminalById = !Number.isNaN(statusIdNumber) && (statusIdNumber === 4 || statusIdNumber === 5);
+	const hasNonTerminalActiveService = !!activeService && !(statusNameUpper === 'CANCELED' || statusNameUpper === 'DELIVERED' || isTerminalById);
 	const canToggleAvailability = !hasNonTerminalActiveService;
 
 	const respondToService = async (action) => {

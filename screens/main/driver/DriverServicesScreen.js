@@ -29,7 +29,10 @@ export default function DriverServicesScreen() {
 	const [serviceActionError, setServiceActionError] = useState('');
 
 	const isServiceRequested =
-		!!activeService && String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+		!!activeService && (
+			String(activeService?.status_name || '').toUpperCase() === 'CREATED' ||
+			Number(activeService?.status_id) === 1
+		);
 
 	const playAlert = async () => {
 		try {
@@ -69,7 +72,9 @@ export default function DriverServicesScreen() {
 
 	useEffect(() => {
 		if (!activeService) return;
-		const isCreated = String(activeService?.status_name || '').toUpperCase() === 'CREATED';
+		const isCreated =
+			String(activeService?.status_name || '').toUpperCase() === 'CREATED' ||
+			Number(activeService?.status_id) === 1;
 		const serviceId = activeService?.service_id;
 		const isNewService = !!serviceId && serviceId !== lastServiceIdRef.current;
 		if (isCreated && isNewService) {
