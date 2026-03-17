@@ -7,6 +7,12 @@ function normalizeId(val) {
 	return String(val);
 }
 
+const TERMINAL_SERVICE_STATUSES = new Set(['DELIVERED', 'CANCELED']);
+
+function isTerminalService(statusName) {
+	return TERMINAL_SERVICE_STATUSES.has(String(statusName || '').toUpperCase());
+}
+
 export function useDriverDashboard(enabled) {
 	const [state, setState] = useState({
 		loading: false,
@@ -46,6 +52,7 @@ export function useDriverDashboard(enabled) {
 	const lastRefetchAtRef = useRef(0);
 	const pendingRefetchRef = useRef(false);
 	const pendingSilentRef = useRef(null);
+	const lastRealtimeSyncAtRef = useRef(0);
 
 	const refetch = useCallback(async ({ silent = false, force = false } = {}) => {
 		if (!enabled) return;
@@ -217,13 +224,52 @@ export function useDriverDashboard(enabled) {
 	useEffect(() => {
 		if (!enabled || !driverId) return;
 
+		const applyServiceRowToState = (row) => {
+			if (!row) return;
+			const serviceId = normalizeId(row?.service_id ?? row?.id);
+			if (!serviceId) return;
+
+			setState((s) => {
+				const prevActiveId = normalizeId(s?.activeService?.service_id ?? s?.activeService?.id);
+				const nextStatusName = String(row?.status_name || row?.status || '').toUpperCase();
+				const isTerminal = isTerminalService(nextStatusName);
+
+				// Si el servicio actual se volvió terminal, limpiarlo.
+				if (isTerminal && prevActiveId && prevActiveId === serviceId) {
+					return { ...s, activeService: null };
+				}
+
+				// Si llega un servicio no-terminal asignado, mostrarlo inmediatamente.
+				if (!isTerminal) {
+					const merged = s.activeService && prevActiveId === serviceId
+						? { ...s.activeService, ...row, service_id: row?.service_id ?? s.activeService?.service_id }
+						: { ...row, service_id: row?.service_id ?? serviceId };
+					return { ...s, activeService: merged };
+				}
+
+				return s;
+			});
+		};
+
+		const scheduleDashboardSync = () => {
+			const now = Date.now();
+			// Evitar que un aluvión de eventos realtime dispare refetch en bucle.
+			if (now - (lastRealtimeSyncAtRef.current || 0) < 900) return;
+			lastRealtimeSyncAtRef.current = now;
+			refetch({ silent: true });
+		};
+
 		const channel = supabase
 			.channel(`driver-dashboard-services-driver-${driverId}`)
 			.on(
 				'postgres_changes',
 				{ event: '*', schema: 'public', table: 'services', filter: `driver_id=eq.${driverId}` },
-				() => {
-					refetch({ silent: true });
+				(payload) => {
+					const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || null;
+					// 1) Reacción inmediata en UI
+					applyServiceRowToState(row);
+					// 2) Sync completo (detalles + stats) en background
+					scheduleDashboardSync();
 				}
 			)
 			.subscribe();
