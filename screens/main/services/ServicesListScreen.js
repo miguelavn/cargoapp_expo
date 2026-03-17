@@ -143,7 +143,8 @@ export default function ServicesListScreen({ navigation, route }) {
   };
 
   const fetchProjectStats = async (pid) => {
-    if (!pid) {
+    const projectIdNumber = Number(pid);
+    if (!pid || Number.isNaN(projectIdNumber)) {
       setProjectStats(null);
       return;
     }
@@ -151,7 +152,7 @@ export default function ServicesListScreen({ navigation, route }) {
     try {
       const res = await callEdgeFunction('project-vehicles-stats', {
         method: 'GET',
-        query: { project_id: pid },
+        query: { project_id: projectIdNumber },
       });
       const arr = Array.isArray(res?.data) ? res.data : [];
       setProjectStats(arr.length ? arr[0] : null);
@@ -379,20 +380,31 @@ export default function ServicesListScreen({ navigation, route }) {
 
       const arr = Array.isArray(res?.data) ? res.data : [];
 
-      const norm = arr.map((it) => ({
-        service_id: it.service_id,
-        project_name: it.project_name,
-        vehicle: it.vehicle,
-        driver: it.driver,
-        material: it.material,
-        quantity: it.quantity,
-        unit: it.unit,
-        status_name: it.status_name,
-        status_id: it.status_id,
-        created_at: it.created_at,
-        origin_address: it.origin_address,
-        destination_address: it.destination_address,
-      }));
+      const norm = arr.map((it) => {
+        const originAddress = typeof it?.origin_address === 'object'
+          ? (it.origin_address?.address ?? null)
+          : (it.origin_address ?? it.origin ?? null);
+        const destinationAddress = typeof it?.destination_address === 'object'
+          ? (it.destination_address?.address ?? null)
+          : (it.destination_address ?? it.destination ?? null);
+
+        return {
+          service_id: it.service_id,
+          project_name: it.project_name,
+          vehicle: it.vehicle,
+          driver: it.driver,
+          material: it.material,
+          quantity: it.quantity,
+          unit: it.unit,
+          status_name: it.status_name,
+          status_id: it.status_id,
+          created_at: it.created_at,
+          origin: it.origin ?? originAddress,
+          destination: it.destination ?? destinationAddress,
+          origin_address: originAddress,
+          destination_address: destinationAddress,
+        };
+      });
 
       if (reset) {
         setServices(norm);
