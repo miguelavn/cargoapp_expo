@@ -906,14 +906,24 @@ export default function ServicesListScreen({ navigation, route }) {
           }
           refreshing={loading}
           onRefresh={() => load(true)}
-          onEndReached={() => load(false)}
-          onEndReachedThreshold={0.5}
           removeClippedSubviews
           initialNumToRender={10}
           maxToRenderPerBatch={10}
           windowSize={7}
           ListFooterComponent={
-            loadingMore ? <ActivityIndicator color={COLORS.primary} style={{ marginVertical: 12 }} /> : null
+            loadingMore ? (
+              <ActivityIndicator color={COLORS.primary} style={{ marginVertical: 12 }} />
+            ) : hasMore ? (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => load(false)}
+                style={styles.loadMoreBtn}
+              >
+                <Text style={styles.loadMoreBtnText}>Cargar más</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={{ height: 12 }} />
+            )
           }
           contentContainerStyle={{ paddingTop: 12, paddingBottom: 40 }}
         />
@@ -1031,4 +1041,21 @@ const styles = StyleSheet.create({
 
   badgeDangerSoft: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, borderWidth: 1, borderColor: COLORS.danger, backgroundColor: COLORS.soft },
   badgeDangerSoftText: { fontSize: 10, fontWeight: '900', color: COLORS.danger },
+
+  loadMoreBtn: {
+    marginTop: 12,
+    marginBottom: 14,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  loadMoreBtnText: {
+    color: COLORS.foreground || COLORS.dark,
+    fontWeight: '900',
+    fontSize: 13,
+  },
 });
