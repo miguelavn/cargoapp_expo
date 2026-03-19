@@ -5,6 +5,7 @@ import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import Constants from 'expo-constants';
 import polyline from '@mapbox/polyline';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS } from '../../../theme/colors';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
@@ -410,8 +411,10 @@ export default function ActiveTripScreen({ route }) {
       destinationCoord,
       hasDirectionsKey: !!googleMapsApiKey,
       serviceId: routeServiceId,
+      routeToPickupLen: routeToPickup?.length || 0,
+      routeToDestinationLen: routeToDestination?.length || 0,
     });
-  }, [driverCoord, originCoord, destinationCoord, googleMapsApiKey]);
+  }, [driverCoord, originCoord, destinationCoord, googleMapsApiKey, routeToPickup, routeToDestination, routeServiceId]);
 
   // Ubicación del conductor en tiempo real.
   useEffect(() => {
@@ -488,20 +491,48 @@ export default function ActiveTripScreen({ route }) {
 
   async function getRoute(from, to) {
     if (!from || !to) return [];
-    if (!googleMapsApiKey) return [from, to];
+    if (!googleMapsApiKey) {
+      if (__DEV__) {
+        // eslint-disable-next-line no-console
+        console.warn('[ActiveTrip] Google Maps API key vacía; usando línea recta');
+      }
+      return [from, to];
+    }
 
     const origin = `${from.latitude},${from.longitude}`;
     const destination = `${to.latitude},${to.longitude}`;
     const url =
       `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(origin)}` +
       `&destination=${encodeURIComponent(destination)}` +
+      `&mode=driving` +
       `&key=${encodeURIComponent(googleMapsApiKey)}`;
 
     const res = await fetch(url);
     const json = await res.json();
 
+    const apiStatus = String(json?.status || '');
+    if (apiStatus && apiStatus !== 'OK') {
+      const msg = json?.error_message ? `: ${json.error_message}` : '';
+      if (__DEV__) {
+        // eslint-disable-next-line no-console
+        console.warn('[ActiveTrip] Directions no OK', {
+          status: apiStatus,
+          message: json?.error_message,
+          routes: Array.isArray(json?.routes) ? json.routes.length : null,
+        });
+      }
+      throw new Error(`Directions status ${apiStatus}${msg}`);
+    }
+
     const points = json?.routes?.[0]?.overview_polyline?.points;
     const decoded = decodeGooglePolyline(points);
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.log('[ActiveTrip] Directions decoded', {
+        pointsEncodedLen: typeof points === 'string' ? points.length : 0,
+        coordsLen: decoded?.length || 0,
+      });
+    }
     return decoded?.length ? decoded : [from, to];
   }
 
@@ -555,6 +586,12 @@ export default function ActiveTripScreen({ route }) {
       try {
         const coords = await getRoute(driverCoord, originCoord);
         if (cancelled) return;
+        if (__DEV__ && (coords?.length || 0) <= 2) {
+          // eslint-disable-next-line no-console
+          console.warn('[ActiveTrip] Ruta conductor→recogida sin detalle (línea recta). Posible ZERO_RESULTS/coord fuera de vía.', {
+            coordsLen: coords?.length || 0,
+          });
+        }
         setRouteToPickup(coords);
       } catch {
         if (cancelled) return;
@@ -690,27 +727,42 @@ export default function ActiveTripScreen({ route }) {
         {originCoord ? (
           <Marker
             coordinate={originCoord}
-            title="Recoger"
+            title="A - Recoger"
             description={originText}
-            pinColor={COLORS.primary}
-          />
+            tracksViewChanges={false}
+            anchor={{ x: 0.5, y: 0.9 }}
+          >
+            <View style={[styles.letterMarker, { backgroundColor: COLORS.primary, borderColor: COLORS.primary }]}>
+              <Text style={styles.letterMarkerText}>A</Text>
+            </View>
+          </Marker>
         ) : null}
 
         {destinationCoord ? (
           <Marker
             coordinate={destinationCoord}
-            title="Entregar"
+            title="B - Entregar"
             description={destinationText}
-            pinColor={COLORS.success}
-          />
+            tracksViewChanges={false}
+            anchor={{ x: 0.5, y: 0.9 }}
+          >
+            <View style={[styles.letterMarker, { backgroundColor: COLORS.success, borderColor: COLORS.success }]}>
+              <Text style={styles.letterMarkerText}>B</Text>
+            </View>
+          </Marker>
         ) : null}
 
         {driverCoord ? (
           <Marker
             coordinate={driverCoord}
-            title="Tú"
-            pinColor={COLORS.foreground || COLORS.dark}
-          />
+            title="Vehículo"
+            tracksViewChanges={false}
+            anchor={{ x: 0.5, y: 0.5 }}
+          >
+            <View style={styles.vehicleMarker}>
+              <MaterialCommunityIcons name="truck" size={20} color={COLORS.white} />
+            </View>
+          </Marker>
         ) : null}
 
         {(routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords)?.length >= 2 ? (
@@ -770,6 +822,30 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.background },
   map: { ...StyleSheet.absoluteFillObject },
   overlay: { flex: 1 },
+
+  letterMarker: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  letterMarkerText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  vehicleMarker: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: COLORS.foreground || COLORS.dark,
+    borderWidth: 2,
+    borderColor: COLORS.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   topBadgeWrap: {
     position: 'absolute',
