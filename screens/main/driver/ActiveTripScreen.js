@@ -418,6 +418,9 @@ export default function ActiveTripScreen({ route }) {
   const [pauseActionLoading, setPauseActionLoading] = useState(false);
   const [pauseActionError, setPauseActionError] = useState('');
 
+  const [statusActionLoading, setStatusActionLoading] = useState(false);
+  const [statusActionError, setStatusActionError] = useState('');
+
   // react-native-maps (especialmente en Android) puede no renderizar
   // correctamente Markers con children si tracksViewChanges=false desde el inicio.
   // Lo dejamos true por un momento y luego lo apagamos.
@@ -428,6 +431,12 @@ export default function ActiveTripScreen({ route }) {
   }, [driverCoord, originCoord, destinationCoord]);
 
   const serviceId = routeServiceId ?? service?.service_id ?? null;
+
+  const statusUpper = useMemo(() => {
+    return String(service?.status_name || '').toUpperCase();
+  }, [service?.status_name]);
+
+  const canCoordinatorCancel = statusUpper === '' || statusUpper === 'CREATED' || statusUpper === 'ACCEPTED';
 
   const isPaused = useMemo(() => {
     const sub = String(service?.substatus_name || '').toUpperCase();
@@ -475,6 +484,8 @@ export default function ActiveTripScreen({ route }) {
     const sid = serviceId;
     if (!sid) return;
 
+    if (!canCoordinatorCancel) return;
+
     let unsubscribed = false;
 
     const channel = supabase
@@ -492,8 +503,8 @@ export default function ActiveTripScreen({ route }) {
 
           (async () => {
             const latest = await refetchService();
-            const statusUpper = String(latest?.status_name || service?.status_name || '').toUpperCase();
-            if (statusUpper === 'CANCELED') {
+            const latestUpper = String(latest?.status_name || '').toUpperCase();
+            if (latestUpper === 'CANCELED') {
               setPauseModalVisible(false);
               try {
                 if (navigation?.canGoBack?.()) {
@@ -520,7 +531,7 @@ export default function ActiveTripScreen({ route }) {
     };
     // Ojo: usamos service?.status_name como fallback, pero no re-suscribimos por ese estado.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serviceId]);
+  }, [serviceId, canCoordinatorCancel]);
 
   const setServiceSubstatus = async (nextSubstatus, reasonId) => {
     const sid = serviceId;
@@ -555,6 +566,34 @@ export default function ActiveTripScreen({ route }) {
       throw e;
     } finally {
       setPauseActionLoading(false);
+    }
+  };
+
+  const setServiceStatus = async (nextStatus) => {
+    const sid = serviceId;
+    if (!sid) return;
+    if (statusActionLoading) return;
+
+    setStatusActionError('');
+    setStatusActionLoading(true);
+    try {
+      const next = String(nextStatus || '').toUpperCase();
+      await callEdgeFunction('driver-service-response', {
+        method: 'POST',
+        body: { service_id: Number(sid), status: next },
+        timeout: 20000,
+      });
+
+      if (next === 'LOADED') {
+        setTripStarted(true);
+      }
+
+      await refetchService();
+    } catch (e) {
+      setStatusActionError(e?.message || 'No se pudo actualizar el estado');
+      throw e;
+    } finally {
+      setStatusActionLoading(false);
     }
   };
 
@@ -1027,6 +1066,34 @@ export default function ActiveTripScreen({ route }) {
             <Text style={styles.value} numberOfLines={2}>{destinationText}</Text>
 
             <View style={{ height: 12 }} />
+
+            {statusUpper === 'ACCEPTED' ? (
+              <>
+                <Pressable
+                  onPress={async () => {
+                    try {
+                      await setServiceStatus('LOADED');
+                    } catch {
+                      // error ya seteado
+                    }
+                  }}
+                  disabled={statusActionLoading || isPaused}
+                  style={[
+                    styles.primaryBtn,
+                    styles.primaryBtnSuccess,
+                    (statusActionLoading || isPaused) && styles.btnDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryBtnText}>{statusActionLoading ? 'Guardando…' : 'Ya cargué'}</Text>
+                </Pressable>
+
+                {statusActionError ? (
+                  <Text style={styles.inlineError}>{statusActionError}</Text>
+                ) : null}
+
+                <View style={{ height: 10 }} />
+              </>
+            ) : null}
 
             <Pressable
               onPress={() => setTripStarted((v) => !v)}
