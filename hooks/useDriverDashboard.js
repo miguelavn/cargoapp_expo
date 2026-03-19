@@ -160,23 +160,57 @@ export function useDriverDashboard(enabled) {
 			}
 
 			let activeService = json?.active_service ?? null;
+			// Importante: si Realtime ya colocó un servicio activo pero el dashboard aún no lo incluye,
+			// NO lo borres (esto causaba que “aparezca” 5-10s después).
+			if (!activeService && stateRef.current?.activeService) {
+				activeService = stateRef.current.activeService;
+			}
 			// Fallback: si el dashboard no trae active_service, resolverlo directo por driver_id.
 			if (!activeService && appUserIdRef.current != null) {
 				try {
-					const { data, error } = await supabase
-						.from('services')
-						.select('service_id, driver_id, vehicle_id, status_id, status_name, origin_address, destination_address, origin_location, destination_location, substatus_id, substatus_name, pause_reason_id')
-						.eq('driver_id', appUserIdRef.current)
-						.not('status_id', 'in', '(4,5)')
-						.order('service_id', { ascending: false })
-						.limit(1)
-						.maybeSingle();
+					// Preferir view si existe (incluye status_name/substatus_name). Si falla, caer a tabla.
+					let data;
+					let error;
+					try {
+						const res = await supabase
+							.from('services_full_view')
+							.select('service_id, driver_id, vehicle_id, status_id, status_name, origin_address, destination_address, origin_location, destination_location, substatus_id, substatus_name, pause_reason_id')
+							.eq('driver_id', appUserIdRef.current)
+							.not('status_id', 'in', '(4,5)')
+							.order('service_id', { ascending: false })
+							.limit(1)
+							.maybeSingle();
+						data = res.data;
+						error = res.error;
+					} catch {
+						// ignore
+					}
+
+					if (!data && !error) {
+						const res2 = await supabase
+							.from('services')
+							.select('service_id, driver_id, vehicle_id, status_id, origin_address, destination_address, origin_location, destination_location, substatus_id, pause_reason_id')
+							.eq('driver_id', appUserIdRef.current)
+							.not('status_id', 'in', '(4,5)')
+							.order('service_id', { ascending: false })
+							.limit(1)
+							.maybeSingle();
+						data = res2.data;
+						error = res2.error;
+					}
+
 					if (error) throw error;
 					if (data) activeService = data;
 				} catch (e) {
 					// eslint-disable-next-line no-console
 					console.warn('[driver-dashboard] No se pudo resolver active_service (fallback)', e?.message || e);
 				}
+			}
+
+			// Asegurar status_name normalizado cuando venga solo status_id.
+			if (activeService && !activeService?.status_name) {
+				const normalized = normalizeStatusNameFromRow(activeService);
+				if (normalized) activeService = { ...activeService, status_name: normalized };
 			}
 
 			if (!mountedRef.current) return;
