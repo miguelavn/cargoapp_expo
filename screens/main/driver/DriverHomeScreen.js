@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
 import { Audio } from 'expo-av';
 import { COLORS } from '../../../theme/colors';
@@ -18,6 +19,7 @@ function hasPerm(perms = [], needle) {
 }
 
 export default function DriverHomeScreen() {
+	const navigation = useNavigation();
 	const { permissions } = usePermissions();
 	const isDriver = useMemo(
 		() => hasPerm(permissions, 'view_the_services_assigned_to_me_at_my_company'),
@@ -205,6 +207,9 @@ export default function DriverHomeScreen() {
 				body: { service_id: activeService.service_id, action },
 				timeout: 20000,
 			});
+			if (action === 'accept') {
+				navigation.navigate('ActiveTrip', { serviceId: activeService.service_id, service: activeService });
+			}
 			await refetch({ silent: true });
 		} catch (e) {
 			setServiceActionError(e?.message || 'No se pudo actualizar el servicio');

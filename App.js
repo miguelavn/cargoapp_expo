@@ -17,6 +17,7 @@ import VehicleScreen from './screens/main/vehicle/VehicleScreen';
 import AccountScreen from './screens/main/account/AccountScreen';
 import ServicesListScreen from './screens/main/services/ServicesListScreen';
 import RegisterServiceScreen from './screens/main/services/RegisterServiceScreen';
+import ActiveTripScreen from './screens/main/driver/ActiveTripScreen';
 
 import ForgotPasswordScreen from './screens/main/login/ForgotPasswordScreen';
 import VerifyCodeScreen from './screens/main/login/VerifyCodeScreen';
@@ -205,6 +206,12 @@ export default function App() {
         <Stack.Screen 
           name="RegisterService" 
           component={RegisterServiceScreen} 
+          options={{ headerShown: false }} 
+        />
+
+        <Stack.Screen 
+          name="ActiveTrip" 
+          component={ActiveTripScreen} 
           options={{ headerShown: false }} 
         />
 

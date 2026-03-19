@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, View, Text, StyleSheet, TouchableOpacity, FlatList, Platform, Alert, useWindowDimensions, TextInput, Switch, Modal, Pressable } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
@@ -145,6 +146,9 @@ export default function ServicesListScreen({ navigation, route }) {
   const statsLastRunAtRef = useRef(0);
   const STATS_THROTTLE_MS = 2500;
 
+  const statsPollIntervalRef = useRef(null);
+  const STATS_POLL_MS = 20000;
+
   const listReloadTimerRef = useRef(null);
   const listLastRunAtRef = useRef(0);
   const LIST_THROTTLE_MS = 1200;
@@ -196,6 +200,34 @@ export default function ServicesListScreen({ navigation, route }) {
       setLoadingStats(false);
     }
   };
+
+  // Fallback: cuando la pantalla está en foco, hacer polling suave de stats.
+  // Esto ayuda cuando Realtime no entrega eventos (por RLS o tablas no habilitadas en replication).
+  useFocusEffect(
+    React.useCallback(() => {
+      // Refresco inmediato al entrar
+      if (projectIdRef.current) {
+        fetchProjectStats(projectIdRef.current);
+      }
+
+      if (statsPollIntervalRef.current) {
+        clearInterval(statsPollIntervalRef.current);
+        statsPollIntervalRef.current = null;
+      }
+
+      statsPollIntervalRef.current = setInterval(() => {
+        if (!projectIdRef.current) return;
+        scheduleStatsReload();
+      }, STATS_POLL_MS);
+
+      return () => {
+        if (statsPollIntervalRef.current) {
+          clearInterval(statsPollIntervalRef.current);
+          statsPollIntervalRef.current = null;
+        }
+      };
+    }, [])
+  );
 
   useEffect(() => {
     (async () => {
@@ -477,6 +509,12 @@ export default function ServicesListScreen({ navigation, route }) {
 
       setServices((prev) => (reset ? mergeUniqueServices([], norm) : mergeUniqueServices(prev, norm)));
 
+      // Mantener stats en sync con los cambios de la lista (y con acciones como update-service).
+      // Útil cuando Realtime no dispara por políticas/replication.
+      if (reset && projectIdRef.current) {
+        scheduleStatsReload();
+      }
+
       const got = arr.length;
       const nextHasMore = got >= limit;
       setHasMore(nextHasMore);
@@ -511,6 +549,7 @@ export default function ServicesListScreen({ navigation, route }) {
       });
       Alert.alert('Éxito', 'Servicio cancelado');
       await load(true);
+      scheduleStatsReload();
     } catch (e) {
       Alert.alert('Error', e.message || 'No se pudo cancelar el servicio');
     } finally {
