@@ -7,12 +7,19 @@ function normalizeId(val) {
 	return String(val);
 }
 
-const TERMINAL_STATUS_IDS = new Set([4, 5]); // DELIVERED, CANCELED
 const TERMINAL_SERVICE_STATUSES = new Set(['DELIVERED', 'CANCELED']);
 
-function normalizeStatusNameFromRow(row) {
+function normalizeStatusNameFromRow(row, statusNameById) {
 	const raw = row?.status_name ?? row?.status;
 	if (raw != null && String(raw).trim()) return String(raw).toUpperCase();
+
+	const idKey = normalizeId(row?.status_id);
+	if (idKey && statusNameById && typeof statusNameById.get === 'function') {
+		const mapped = statusNameById.get(idKey);
+		if (mapped != null && String(mapped).trim()) return String(mapped).toUpperCase();
+	}
+
+	// Último fallback (si tus IDs coinciden con los defaults)
 	const sid = Number(row?.status_id);
 	if (sid === 1) return 'CREATED';
 	if (sid === 2) return 'ACCEPTED';
@@ -22,10 +29,8 @@ function normalizeStatusNameFromRow(row) {
 	return '';
 }
 
-function isTerminalServiceRow(row) {
-	const sid = Number(row?.status_id);
-	if (!Number.isNaN(sid) && TERMINAL_STATUS_IDS.has(sid)) return true;
-	const name = normalizeStatusNameFromRow(row);
+function isTerminalServiceRow(row, statusNameById) {
+	const name = normalizeStatusNameFromRow(row, statusNameById);
 	return TERMINAL_SERVICE_STATUSES.has(name);
 }
 
@@ -41,6 +46,38 @@ export function useDriverDashboard(enabled) {
 
 	const appUserIdRef = useRef(null);
 	const appUserIdReadyRef = useRef(false);
+	const statusNameByIdRef = useRef(new Map());
+	const statusCatalogLoadedRef = useRef(false);
+	const statusCatalogLoadingRef = useRef(false);
+
+	const loadStatusCatalog = useCallback(async () => {
+		if (!enabled) return;
+		if (statusCatalogLoadedRef.current) return;
+		if (statusCatalogLoadingRef.current) return;
+		statusCatalogLoadingRef.current = true;
+		try {
+			const { data, error } = await supabase
+				.from('service_status')
+				.select('id, status_name');
+			if (error) throw error;
+			const map = new Map();
+			for (const row of data || []) {
+				const idKey = normalizeId(row?.id);
+				const name = row?.status_name;
+				if (idKey && name) map.set(idKey, String(name));
+			}
+			statusNameByIdRef.current = map;
+		} catch {
+			// ignore (usaremos fallbacks)
+		} finally {
+			statusCatalogLoadedRef.current = true;
+			statusCatalogLoadingRef.current = false;
+		}
+	}, [enabled]);
+
+	useEffect(() => {
+		loadStatusCatalog();
+	}, [loadStatusCatalog]);
 
 	const stateRef = useRef(state);
 	useEffect(() => {
@@ -75,6 +112,7 @@ export function useDriverDashboard(enabled) {
 
 	const refetch = useCallback(async ({ silent = false, force = false } = {}) => {
 		if (!enabled) return;
+		await loadStatusCatalog();
 		if (refetchInFlightRef.current) {
 			pendingRefetchRef.current = true;
 			pendingSilentRef.current = pendingSilentRef.current == null
@@ -176,11 +214,12 @@ export function useDriverDashboard(enabled) {
 							.from('services_full_view')
 							.select('service_id, driver_id, vehicle_id, status_id, status_name, origin_address, destination_address, origin_location, destination_location, substatus_id, substatus_name, pause_reason_id')
 							.eq('driver_id', appUserIdRef.current)
-							.not('status_id', 'in', '(4,5)')
 							.order('service_id', { ascending: false })
-							.limit(1)
-							.maybeSingle();
-						data = res.data;
+							.limit(5);
+						if (res.error) throw res.error;
+						data = Array.isArray(res.data)
+							? (res.data.find((r) => !isTerminalServiceRow(r, statusNameByIdRef.current)) || null)
+							: null;
 						error = res.error;
 					} catch {
 						// ignore
@@ -191,11 +230,12 @@ export function useDriverDashboard(enabled) {
 							.from('services')
 							.select('service_id, driver_id, vehicle_id, status_id, origin_address, destination_address, origin_location, destination_location, substatus_id, pause_reason_id')
 							.eq('driver_id', appUserIdRef.current)
-							.not('status_id', 'in', '(4,5)')
 							.order('service_id', { ascending: false })
-							.limit(1)
-							.maybeSingle();
-						data = res2.data;
+							.limit(5);
+						if (res2.error) throw res2.error;
+						data = Array.isArray(res2.data)
+							? (res2.data.find((r) => !isTerminalServiceRow(r, statusNameByIdRef.current)) || null)
+							: null;
 						error = res2.error;
 					}
 
@@ -209,8 +249,13 @@ export function useDriverDashboard(enabled) {
 
 			// Asegurar status_name normalizado cuando venga solo status_id.
 			if (activeService && !activeService?.status_name) {
-				const normalized = normalizeStatusNameFromRow(activeService);
+				const normalized = normalizeStatusNameFromRow(activeService, statusNameByIdRef.current);
 				if (normalized) activeService = { ...activeService, status_name: normalized };
+			}
+
+			// Si el servicio resultó terminal, limpiarlo.
+			if (activeService && isTerminalServiceRow(activeService, statusNameByIdRef.current)) {
+				activeService = null;
 			}
 
 			if (!mountedRef.current) return;
@@ -243,7 +288,7 @@ export function useDriverDashboard(enabled) {
 				}, 0);
 			}
 		}
-	}, [enabled]);
+	}, [enabled, loadStatusCatalog]);
 
 	// Asegurar que appUserId esté resuelto lo antes posible para Realtime.
 	useEffect(() => {
@@ -343,11 +388,11 @@ export function useDriverDashboard(enabled) {
 			if (!row) return;
 			const serviceId = normalizeId(row?.service_id ?? row?.id);
 			if (!serviceId) return;
-			const normalizedStatusName = normalizeStatusNameFromRow(row);
+			const normalizedStatusName = normalizeStatusNameFromRow(row, statusNameByIdRef.current);
 
 			setState((s) => {
 				const prevActiveId = normalizeId(s?.activeService?.service_id ?? s?.activeService?.id);
-				const isTerminal = isTerminalServiceRow(row);
+				const isTerminal = isTerminalServiceRow(row, statusNameByIdRef.current);
 
 				// Si el servicio actual se volvió terminal, limpiarlo.
 				if (isTerminal && prevActiveId && prevActiveId === serviceId) {

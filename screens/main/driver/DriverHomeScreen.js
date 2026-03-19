@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
 import { Audio } from 'expo-av';
 import { COLORS } from '../../../theme/colors';
@@ -75,6 +75,13 @@ export default function DriverHomeScreen() {
 		setAvailability,
 		refetch,
 	} = useDriverDashboard(isDriver);
+
+	useFocusEffect(
+		useCallback(() => {
+			if (!isDriver) return;
+			refetch?.({ silent: true, force: true });
+		}, [isDriver, refetch])
+	);
 
 	const [serviceActionLoading, setServiceActionLoading] = useState('');
 	const [serviceActionError, setServiceActionError] = useState('');
