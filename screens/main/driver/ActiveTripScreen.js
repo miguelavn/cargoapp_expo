@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -321,6 +321,9 @@ export default function ActiveTripScreen({ route }) {
         'destination_address',
         'status_id',
         'status_name',
+        'substatus_id',
+        'substatus_name',
+        'pause_reason_id',
         'origin_id',
         'destination_id',
       ].join(',');
@@ -332,6 +335,8 @@ export default function ActiveTripScreen({ route }) {
         'origin_address',
         'destination_address',
         'status_id',
+        'substatus_id',
+        'pause_reason_id',
         'origin',
         'destination',
       ].join(',');
@@ -405,6 +410,12 @@ export default function ActiveTripScreen({ route }) {
   const [trackMarkerChanges, setTrackMarkerChanges] = useState(true);
   const [truckImageOk, setTruckImageOk] = useState(true);
 
+  const [pauseReasons, setPauseReasons] = useState([]);
+  const [pauseReasonsLoading, setPauseReasonsLoading] = useState(false);
+  const [pauseModalVisible, setPauseModalVisible] = useState(false);
+  const [pauseActionLoading, setPauseActionLoading] = useState(false);
+  const [pauseActionError, setPauseActionError] = useState('');
+
   // react-native-maps (especialmente en Android) puede no renderizar
   // correctamente Markers con children si tracksViewChanges=false desde el inicio.
   // Lo dejamos true por un momento y luego lo apagamos.
@@ -413,6 +424,103 @@ export default function ActiveTripScreen({ route }) {
     const t = setTimeout(() => setTrackMarkerChanges(false), 1500);
     return () => clearTimeout(t);
   }, [driverCoord, originCoord, destinationCoord]);
+
+  const serviceId = routeServiceId ?? service?.service_id ?? null;
+
+  const isPaused = useMemo(() => {
+    const sub = String(service?.substatus_name || '').toUpperCase();
+    if (sub === 'PAUSED') return true;
+    return service?.pause_reason_id != null;
+  }, [service?.substatus_name, service?.pause_reason_id]);
+
+  const refetchService = async () => {
+    const sid = serviceId;
+    if (!sid) return;
+
+    try {
+      const res = await callEdgeFunction('list-services', {
+        method: 'GET',
+        query: { service_id: Number(sid) },
+        timeout: 30000,
+      });
+      const row = normalizeServiceRow(res?.data ?? null);
+      if (row) {
+        setService((prev) => ({ ...prev, ...row }));
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const { data } = await supabase
+        .from('services')
+        .select('service_id, status_id, substatus_id, pause_reason_id')
+        .eq('service_id', Number(sid))
+        .maybeSingle();
+      if (data) setService((prev) => ({ ...prev, ...normalizeServiceRow(data) }));
+    } catch {
+      // ignore
+    }
+  };
+
+  const setServiceSubstatus = async (nextSubstatus, reasonId) => {
+    const sid = serviceId;
+    if (!sid) return;
+    if (pauseActionLoading) return;
+
+    setPauseActionError('');
+    setPauseActionLoading(true);
+    try {
+      const next = String(nextSubstatus || '').toUpperCase();
+      const body = {
+        service_id: Number(sid),
+        substatus: next,
+      };
+
+      if (next === 'PAUSED') {
+        body.pause_reason_id = reasonId;
+      }
+      if (next === 'ACTIVED') {
+        body.pause_reason_id = null;
+      }
+
+      await callEdgeFunction('driver-service-response', {
+        method: 'POST',
+        body,
+        timeout: 20000,
+      });
+
+      await refetchService();
+    } catch (e) {
+      setPauseActionError(e?.message || 'No se pudo actualizar la pausa');
+      throw e;
+    } finally {
+      setPauseActionLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setPauseReasonsLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('pause_reasons')
+          .select('id, name')
+          .order('name', { ascending: true });
+        if (error) throw error;
+        if (!cancelled) setPauseReasons(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) setPauseReasons([]);
+      } finally {
+        if (!cancelled) setPauseReasonsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const fallbackPickupToDropoffCoords = useMemo(() => {
     if (!originCoord || !destinationCoord) return [];
@@ -737,7 +845,9 @@ export default function ActiveTripScreen({ route }) {
 
   const badgeText = locationError
     ? locationError
-    : (tripStarted ? 'En camino a entregar' : 'En camino a recoger');
+    : isPaused
+      ? 'Servicio pausado'
+      : (tripStarted ? 'En camino a entregar' : 'En camino a recoger');
 
   return (
     <View style={styles.screen}>
@@ -862,13 +972,97 @@ export default function ActiveTripScreen({ route }) {
 
             <Pressable
               onPress={() => setTripStarted((v) => !v)}
-              style={[styles.primaryBtn, tripStarted && styles.primaryBtnDanger]}
+              disabled={isPaused}
+              style={[styles.primaryBtn, tripStarted && styles.primaryBtnDanger, isPaused && styles.btnDisabled]}
             >
               <Text style={styles.primaryBtnText}>{tripStarted ? 'Finalizar' : 'Iniciar viaje'}</Text>
             </Pressable>
+
+            <View style={{ height: 10 }} />
+
+            {isPaused ? (
+              <Pressable
+                onPress={async () => {
+                  try {
+                    await setServiceSubstatus('ACTIVED');
+                  } catch {
+                    // error ya seteado
+                  }
+                }}
+                disabled={pauseActionLoading}
+                style={[styles.primaryBtn, styles.primaryBtnSuccess, pauseActionLoading && styles.btnDisabled]}
+              >
+                <Text style={styles.primaryBtnText}>{pauseActionLoading ? 'Reanudando…' : 'Reanudar servicio'}</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={() => {
+                  setPauseActionError('');
+                  setPauseModalVisible(true);
+                }}
+                disabled={pauseActionLoading}
+                style={[styles.primaryBtn, styles.primaryBtnGhost, pauseActionLoading && styles.btnDisabled]}
+              >
+                <Text style={[styles.primaryBtnText, styles.primaryBtnGhostText]}>
+                  {pauseActionLoading ? 'Procesando…' : 'Pausar servicio'}
+                </Text>
+              </Pressable>
+            )}
+
+            {pauseActionError ? (
+              <Text style={styles.inlineError}>{pauseActionError}</Text>
+            ) : null}
           </View>
         </View>
       </SafeAreaView>
+
+      {pauseModalVisible ? (
+        <SafeAreaView style={styles.modalBackdrop} edges={['top', 'bottom', 'left', 'right']}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Selecciona una razón de pausa</Text>
+            <View style={{ height: 10 }} />
+
+            {pauseReasonsLoading ? (
+              <View style={styles.centerRow}>
+                <ActivityIndicator color={COLORS.primary} />
+                <Text style={styles.modalMuted}>Cargando razones…</Text>
+              </View>
+            ) : pauseReasons?.length ? (
+              <ScrollView style={styles.modalList} contentContainerStyle={{ paddingVertical: 6 }}>
+                {pauseReasons.map((r) => (
+                  <Pressable
+                    key={String(r?.id)}
+                    onPress={async () => {
+                      try {
+                        await setServiceSubstatus('PAUSED', r?.id);
+                        setPauseModalVisible(false);
+                      } catch {
+                        // mantener abierto si falla
+                      }
+                    }}
+                    disabled={pauseActionLoading}
+                    style={[styles.reasonRow, pauseActionLoading && styles.btnDisabled]}
+                  >
+                    <Text style={styles.reasonText}>{String(r?.name || '—')}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            ) : (
+              <Text style={styles.modalMuted}>No hay razones disponibles.</Text>
+            )}
+
+            <View style={{ height: 12 }} />
+
+            <Pressable
+              onPress={() => setPauseModalVisible(false)}
+              disabled={pauseActionLoading}
+              style={[styles.primaryBtn, styles.primaryBtnGhost, pauseActionLoading && styles.btnDisabled]}
+            >
+              <Text style={[styles.primaryBtnText, styles.primaryBtnGhostText]}>Cancelar</Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      ) : null}
     </View>
   );
 }
@@ -973,9 +1167,56 @@ const styles = StyleSheet.create({
   primaryBtnDanger: {
     backgroundColor: COLORS.danger,
   },
+  primaryBtnSuccess: {
+    backgroundColor: COLORS.success,
+  },
+  primaryBtnGhost: {
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  primaryBtnGhostText: {
+    color: COLORS.foreground || COLORS.dark,
+  },
   primaryBtnText: {
     color: COLORS.white,
     fontSize: 14,
     fontWeight: '900',
   },
+
+  btnDisabled: { opacity: 0.6 },
+  inlineError: { marginTop: 10, color: COLORS.danger, fontSize: 13, fontWeight: '800' },
+
+  modalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: COLORS.background,
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  modalCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 14,
+    maxHeight: '80%',
+  },
+  modalTitle: {
+    color: COLORS.foreground || COLORS.dark,
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  modalMuted: {
+    color: COLORS.grayText,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  centerRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  modalList: { borderTopWidth: 1, borderColor: COLORS.border, marginTop: 6 },
+  reasonRow: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: COLORS.border,
+  },
+  reasonText: { color: COLORS.foreground || COLORS.dark, fontSize: 14, fontWeight: '800' },
 });

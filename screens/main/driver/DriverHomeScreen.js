@@ -194,6 +194,9 @@ export default function DriverHomeScreen() {
 	const respondToService = async (action) => {
 		if (!activeService?.service_id) return;
 
+		const status = action === 'accept' ? 'ACCEPTED' : action === 'cancel' ? 'CANCELED' : null;
+		if (!status) return;
+
 		// evitar doble ejecución (doble tap)
 		if (serviceActionLoading) return;
 		if (serviceActionInFlightRef.current) return;
@@ -204,7 +207,7 @@ export default function DriverHomeScreen() {
 		try {
 			await callEdgeFunction('driver-service-response', {
 				method: 'POST',
-				body: { service_id: activeService.service_id, action },
+				body: { service_id: activeService.service_id, status },
 				timeout: 20000,
 			});
 			if (action === 'accept') {

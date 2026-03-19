@@ -92,12 +92,14 @@ export default function DriverServicesScreen() {
 
 	const respondToService = async (action) => {
 		if (!activeService?.service_id) return;
+		const status = action === 'accept' ? 'ACCEPTED' : action === 'cancel' ? 'CANCELED' : null;
+		if (!status) return;
 		setServiceActionError('');
 		setServiceActionLoading(action);
 		try {
 			await callEdgeFunction('driver-service-response', {
 				method: 'POST',
-				body: { service_id: activeService.service_id, action },
+				body: { service_id: activeService.service_id, status },
 				timeout: 20000,
 			});
 			if (action === 'accept') {
