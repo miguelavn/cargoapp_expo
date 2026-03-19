@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -402,6 +402,17 @@ export default function ActiveTripScreen({ route }) {
   const [routeToPickup, setRouteToPickup] = useState([]);
   const [routeToDestination, setRouteToDestination] = useState([]);
   const [tripStarted, setTripStarted] = useState(false);
+  const [trackMarkerChanges, setTrackMarkerChanges] = useState(true);
+  const [truckImageOk, setTruckImageOk] = useState(true);
+
+  // react-native-maps (especialmente en Android) puede no renderizar
+  // correctamente Markers con children si tracksViewChanges=false desde el inicio.
+  // Lo dejamos true por un momento y luego lo apagamos.
+  useEffect(() => {
+    setTrackMarkerChanges(true);
+    const t = setTimeout(() => setTrackMarkerChanges(false), 1500);
+    return () => clearTimeout(t);
+  }, [driverCoord, originCoord, destinationCoord]);
 
   const fallbackPickupToDropoffCoords = useMemo(() => {
     if (!originCoord || !destinationCoord) return [];
@@ -758,7 +769,7 @@ export default function ActiveTripScreen({ route }) {
             coordinate={originCoord}
             title="A - Recoger"
             description={originText}
-            tracksViewChanges={false}
+            tracksViewChanges={trackMarkerChanges}
             anchor={{ x: 0.5, y: 0.9 }}
           >
             <View style={[styles.letterMarker, { backgroundColor: COLORS.primary, borderColor: COLORS.primary }]}>
@@ -772,7 +783,7 @@ export default function ActiveTripScreen({ route }) {
             coordinate={destinationCoord}
             title="B - Entregar"
             description={destinationText}
-            tracksViewChanges={false}
+            tracksViewChanges={trackMarkerChanges}
             anchor={{ x: 0.5, y: 0.9 }}
           >
             <View style={[styles.letterMarker, { backgroundColor: COLORS.success, borderColor: COLORS.success }]}>
@@ -785,12 +796,25 @@ export default function ActiveTripScreen({ route }) {
           <Marker
             coordinate={driverCoord}
             title="Vehículo"
-            tracksViewChanges={false}
+            tracksViewChanges={trackMarkerChanges}
             anchor={{ x: 0.5, y: 0.5 }}
           >
             <View style={styles.vehicleMarker}>
               <View style={{ transform: [{ rotate: `${Number(driverHeading) || 0}deg` }] }}>
-                <MaterialCommunityIcons name="truck" size={20} color={COLORS.white} />
+                <Image
+                  source={require('../../../assets/camion-de-carga.png')}
+                  style={styles.vehicleMarkerImage}
+                  resizeMode="contain"
+                  onError={() => setTruckImageOk(false)}
+                />
+                {!truckImageOk ? (
+                  <MaterialCommunityIcons
+                    name="truck"
+                    size={22}
+                    color={COLORS.foreground || COLORS.dark}
+                    style={styles.vehicleMarkerVectorFallback}
+                  />
+                ) : null}
               </View>
             </View>
           </Marker>
@@ -868,14 +892,22 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   vehicleMarker: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: COLORS.foreground || COLORS.dark,
-    borderWidth: 2,
-    borderColor: COLORS.white,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  vehicleMarkerImage: {
+    width: 28,
+    height: 28,
+  },
+  vehicleMarkerVectorFallback: {
+    position: 'absolute',
+    left: 3,
+    top: 3,
   },
 
   topBadgeWrap: {
