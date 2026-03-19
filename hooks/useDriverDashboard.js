@@ -15,6 +15,8 @@ function normalizeStatusNameFromRow(row) {
 	if (raw != null && String(raw).trim()) return String(raw).toUpperCase();
 	const sid = Number(row?.status_id);
 	if (sid === 1) return 'CREATED';
+	if (sid === 2) return 'ACCEPTED';
+	if (sid === 3) return 'LOADED';
 	if (sid === 4) return 'DELIVERED';
 	if (sid === 5) return 'CANCELED';
 	return '';
@@ -37,6 +39,9 @@ export function useDriverDashboard(enabled) {
 		canceledToday: 0,
 	});
 
+	const appUserIdRef = useRef(null);
+	const appUserIdReadyRef = useRef(false);
+
 	const stateRef = useRef(state);
 	useEffect(() => {
 		stateRef.current = state;
@@ -55,7 +60,7 @@ export function useDriverDashboard(enabled) {
 	}, [state.vehicle]);
 
 	const driverId = useMemo(() => {
-		return normalizeId(state.vehicle?.driver_id);
+		return normalizeId(state.vehicle?.driver_id) || normalizeId(appUserIdRef.current);
 	}, [state.vehicle]);
 
 	const activeServiceId = useMemo(() => {
@@ -84,6 +89,28 @@ export function useDriverDashboard(enabled) {
 		refetchInFlightRef.current = true;
 		setState((s) => ({ ...s, loading: silent ? s.loading : true, error: '' }));
 		try {
+			// Resolver user_id del app_user una sola vez (para Realtime y fallbacks).
+			if (!appUserIdReadyRef.current) {
+				try {
+					const { data: auth } = await supabase.auth.getUser();
+					const authUser = auth?.user;
+					if (authUser?.id) {
+						const u = await supabase
+							.from('app_users')
+							.select('user_id')
+							.eq('auth_id', authUser.id)
+							.maybeSingle();
+						if (!u.error && u.data?.user_id != null) {
+							appUserIdRef.current = u.data.user_id;
+						}
+					}
+				} catch {
+					// ignore
+				} finally {
+					appUserIdReadyRef.current = true;
+				}
+			}
+
 			const json = await callEdgeFunction('driver-dashboard', { method: 'GET' });
 
 			let vehicle = json?.vehicle ?? null;
@@ -113,21 +140,12 @@ export function useDriverDashboard(enabled) {
 			// Fallback: si la Edge Function no trajo vehicle_id, resolver por driver_id del usuario actual.
 			if (!vehicleIdFromEdge) {
 				try {
-					const { data: auth } = await supabase.auth.getUser();
-					const authUser = auth?.user;
-					if (authUser?.id) {
-						const u = await supabase
-							.from('app_users')
-							.select('user_id')
-							.eq('auth_id', authUser.id)
-							.maybeSingle();
-						if (u.error) throw u.error;
-						const driverId = u.data?.user_id;
-						if (driverId != null) {
+						const fallbackDriverId = appUserIdRef.current;
+						if (fallbackDriverId != null) {
 							const v = await supabase
 								.from('vehicles')
 								.select(vehicleSelect)
-								.eq('driver_id', driverId)
+								.eq('driver_id', fallbackDriverId)
 								.eq('is_active', true)
 								.order('vehicle_id', { ascending: false })
 								.limit(1)
@@ -135,10 +153,29 @@ export function useDriverDashboard(enabled) {
 							if (v.error) throw v.error;
 							if (v.data) vehicle = { ...vehicle, ...v.data };
 						}
-					}
 				} catch (e) {
 					// eslint-disable-next-line no-console
 					console.warn('[driver-dashboard] No se pudo resolver vehículo por driver_id', e?.message || e);
+				}
+			}
+
+			let activeService = json?.active_service ?? null;
+			// Fallback: si el dashboard no trae active_service, resolverlo directo por driver_id.
+			if (!activeService && appUserIdRef.current != null) {
+				try {
+					const { data, error } = await supabase
+						.from('services')
+						.select('service_id, driver_id, vehicle_id, status_id, status_name, origin_address, destination_address, origin_location, destination_location, substatus_id, substatus_name, pause_reason_id')
+						.eq('driver_id', appUserIdRef.current)
+						.not('status_id', 'in', '(4,5)')
+						.order('service_id', { ascending: false })
+						.limit(1)
+						.maybeSingle();
+					if (error) throw error;
+					if (data) activeService = data;
+				} catch (e) {
+					// eslint-disable-next-line no-console
+					console.warn('[driver-dashboard] No se pudo resolver active_service (fallback)', e?.message || e);
 				}
 			}
 
@@ -147,7 +184,7 @@ export function useDriverDashboard(enabled) {
 				loading: false,
 				error: '',
 				vehicle,
-				activeService: json?.active_service ?? null,
+				activeService,
 				deliveredToday: Number(json?.stats?.delivered_today ?? 0) || 0,
 				canceledToday: Number(json?.stats?.canceled_today ?? 0) || 0,
 			});
@@ -172,6 +209,36 @@ export function useDriverDashboard(enabled) {
 				}, 0);
 			}
 		}
+	}, [enabled]);
+
+	// Asegurar que appUserId esté resuelto lo antes posible para Realtime.
+	useEffect(() => {
+		let cancelled = false;
+		if (!enabled) return;
+		if (appUserIdReadyRef.current && appUserIdRef.current != null) return;
+		(async () => {
+			try {
+				const { data: auth } = await supabase.auth.getUser();
+				const authUser = auth?.user;
+				if (!authUser?.id) return;
+				const u = await supabase
+					.from('app_users')
+					.select('user_id')
+					.eq('auth_id', authUser.id)
+					.maybeSingle();
+				if (u.error) throw u.error;
+				if (!cancelled && u.data?.user_id != null) {
+					appUserIdRef.current = u.data.user_id;
+				}
+			} catch {
+				// ignore
+			} finally {
+				if (!cancelled) appUserIdReadyRef.current = true;
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
 	}, [enabled]);
 
 	useEffect(() => {
