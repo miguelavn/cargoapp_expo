@@ -247,6 +247,43 @@ export function useDriverDashboard(enabled) {
 				}
 			}
 
+			// Fallback 2: si el vehículo tiene current_service_id, resolver el servicio por id.
+			// Esto cubre el caso donde `services.driver_id` todavía no está seteado.
+			if (!activeService) {
+				const currentServiceId = normalizeId(vehicle?.current_service_id ?? json?.vehicle?.current_service_id);
+				if (currentServiceId) {
+					try {
+						let svc = null;
+						try {
+							const res = await supabase
+								.from('services_full_view')
+								.select('service_id, driver_id, vehicle_id, status_id, status_name, origin_address, destination_address, origin_location, destination_location, substatus_id, substatus_name, pause_reason_id')
+								.eq('service_id', currentServiceId)
+								.maybeSingle();
+							if (res.error) throw res.error;
+							svc = res.data;
+						} catch {
+							// ignore
+						}
+						if (!svc) {
+							const res2 = await supabase
+								.from('services')
+								.select('service_id, driver_id, vehicle_id, status_id, origin_address, destination_address, origin_location, destination_location, substatus_id, pause_reason_id')
+								.eq('service_id', currentServiceId)
+								.maybeSingle();
+							if (res2.error) throw res2.error;
+							svc = res2.data;
+						}
+						if (svc && !isTerminalServiceRow(svc, statusNameByIdRef.current)) {
+							activeService = svc;
+						}
+					} catch (e) {
+						// eslint-disable-next-line no-console
+						console.warn('[driver-dashboard] No se pudo resolver service por current_service_id', e?.message || e);
+					}
+				}
+			}
+
 			// Asegurar status_name normalizado cuando venga solo status_id.
 			if (activeService && !activeService?.status_name) {
 				const normalized = normalizeStatusNameFromRow(activeService, statusNameByIdRef.current);
@@ -438,6 +475,61 @@ export function useDriverDashboard(enabled) {
 			supabase.removeChannel(channel);
 		};
 	}, [enabled, driverId, refetch]);
+
+	// Realtime (respaldo): detectar cambios en services por vehicle_id.
+	// Útil cuando el coordinador crea el servicio y aún no existe driver_id.
+	useEffect(() => {
+		if (!enabled || !vehicleId) return;
+
+		const applyServiceRowToState = (row) => {
+			if (!row) return;
+			const serviceId = normalizeId(row?.service_id ?? row?.id);
+			if (!serviceId) return;
+			const normalizedStatusName = normalizeStatusNameFromRow(row, statusNameByIdRef.current);
+
+			setState((s) => {
+				const prevActiveId = normalizeId(s?.activeService?.service_id ?? s?.activeService?.id);
+				const isTerminal = isTerminalServiceRow(row, statusNameByIdRef.current);
+
+				if (isTerminal && prevActiveId && prevActiveId === serviceId) {
+					return { ...s, activeService: null };
+				}
+
+				if (!isTerminal) {
+					const merged = s.activeService && prevActiveId === serviceId
+						? { ...s.activeService, ...row, status_name: normalizedStatusName || s.activeService?.status_name, service_id: row?.service_id ?? s.activeService?.service_id }
+						: { ...row, status_name: normalizedStatusName, service_id: row?.service_id ?? serviceId };
+					return { ...s, activeService: merged };
+				}
+
+				return s;
+			});
+		};
+
+		const scheduleDashboardSync = () => {
+			const now = Date.now();
+			if (now - (lastRealtimeSyncAtRef.current || 0) < 900) return;
+			lastRealtimeSyncAtRef.current = now;
+			refetch({ silent: true });
+		};
+
+		const channel = supabase
+			.channel(`driver-dashboard-services-vehicle-${vehicleId}`)
+			.on(
+				'postgres_changes',
+				{ event: '*', schema: 'public', table: 'services', filter: `vehicle_id=eq.${vehicleId}` },
+				(payload) => {
+					const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || null;
+					applyServiceRowToState(row);
+					scheduleDashboardSync();
+				}
+			)
+			.subscribe();
+
+		return () => {
+			supabase.removeChannel(channel);
+		};
+	}, [enabled, vehicleId, refetch]);
 
 	const setAvailability = useCallback(
 		async (nextAvailable) => {
