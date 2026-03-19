@@ -182,6 +182,23 @@ function approxMetersBetween(a, b) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+function bearingDegrees(from, to) {
+  if (!from || !to) return null;
+  const toRad = (v) => (v * Math.PI) / 180;
+  const toDeg = (v) => (v * 180) / Math.PI;
+
+  const lat1 = toRad(from.latitude);
+  const lat2 = toRad(to.latitude);
+  const dLon = toRad(to.longitude - from.longitude);
+
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  const brng = toDeg(Math.atan2(y, x));
+  const normalized = (brng + 360) % 360;
+  if (Number.isNaN(normalized)) return null;
+  return normalized;
+}
+
 function decodeGooglePolyline(encoded) {
   if (!encoded) return [];
   try {
@@ -379,6 +396,7 @@ export default function ActiveTripScreen({ route }) {
   }, [service]);
 
   const [driverCoord, setDriverCoord] = useState(null);
+  const [driverHeading, setDriverHeading] = useState(0);
   const [isMapReady, setIsMapReady] = useState(false);
   const [locationError, setLocationError] = useState('');
   const [routeToPickup, setRouteToPickup] = useState([]);
@@ -447,6 +465,9 @@ export default function ActiveTripScreen({ route }) {
         if (!cancelled && !Number.isNaN(initialCoord.latitude) && !Number.isNaN(initialCoord.longitude)) {
           lastDriverCoordRef.current = initialCoord;
           setDriverCoord(initialCoord);
+
+          const h = Number(initial?.coords?.heading);
+          if (!Number.isNaN(h) && h >= 0) setDriverHeading(h);
         }
 
         const sub = await Location.watchPositionAsync(
@@ -464,6 +485,14 @@ export default function ActiveTripScreen({ route }) {
 
             const prev = lastDriverCoordRef.current;
             if (prev && approxMetersBetween(prev, next) < 3) return;
+
+            const headingRaw = Number(loc?.coords?.heading);
+            if (!Number.isNaN(headingRaw) && headingRaw >= 0) {
+              setDriverHeading(headingRaw);
+            } else if (prev) {
+              const b = bearingDegrees(prev, next);
+              if (b != null) setDriverHeading(b);
+            }
 
             lastDriverCoordRef.current = next;
             setDriverCoord(next);
@@ -760,7 +789,9 @@ export default function ActiveTripScreen({ route }) {
             anchor={{ x: 0.5, y: 0.5 }}
           >
             <View style={styles.vehicleMarker}>
-              <MaterialCommunityIcons name="truck" size={20} color={COLORS.white} />
+              <View style={{ transform: [{ rotate: `${Number(driverHeading) || 0}deg` }] }}>
+                <MaterialCommunityIcons name="truck" size={20} color={COLORS.white} />
+              </View>
             </View>
           </Marker>
         ) : null}
