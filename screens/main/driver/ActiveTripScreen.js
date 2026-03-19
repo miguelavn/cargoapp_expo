@@ -436,6 +436,12 @@ export default function ActiveTripScreen({ route }) {
     return String(service?.status_name || '').toUpperCase();
   }, [service?.status_name]);
 
+  // El "inicio" del viaje es implícito: al aceptar ya estás en viaje.
+  // Usamos LOADED para cambiar el badge a "entregar".
+  useEffect(() => {
+    setTripStarted(statusUpper === 'LOADED' || statusUpper === 'DELIVERED');
+  }, [statusUpper]);
+
   const canCoordinatorCancel = statusUpper === '' || statusUpper === 'CREATED' || statusUpper === 'ACCEPTED';
 
   const isPaused = useMemo(() => {
@@ -583,10 +589,6 @@ export default function ActiveTripScreen({ route }) {
         body: { service_id: Number(sid), status: next },
         timeout: 20000,
       });
-
-      if (next === 'LOADED') {
-        setTripStarted(true);
-      }
 
       await refetchService();
     } catch (e) {
@@ -1067,44 +1069,6 @@ export default function ActiveTripScreen({ route }) {
 
             <View style={{ height: 12 }} />
 
-            {statusUpper === 'ACCEPTED' ? (
-              <>
-                <Pressable
-                  onPress={async () => {
-                    try {
-                      await setServiceStatus('LOADED');
-                    } catch {
-                      // error ya seteado
-                    }
-                  }}
-                  disabled={statusActionLoading || isPaused}
-                  style={[
-                    styles.primaryBtn,
-                    styles.primaryBtnSuccess,
-                    (statusActionLoading || isPaused) && styles.btnDisabled,
-                  ]}
-                >
-                  <Text style={styles.primaryBtnText}>{statusActionLoading ? 'Guardando…' : 'Ya cargué'}</Text>
-                </Pressable>
-
-                {statusActionError ? (
-                  <Text style={styles.inlineError}>{statusActionError}</Text>
-                ) : null}
-
-                <View style={{ height: 10 }} />
-              </>
-            ) : null}
-
-            <Pressable
-              onPress={() => setTripStarted((v) => !v)}
-              disabled={isPaused}
-              style={[styles.primaryBtn, tripStarted && styles.primaryBtnDanger, isPaused && styles.btnDisabled]}
-            >
-              <Text style={styles.primaryBtnText}>{tripStarted ? 'Finalizar' : 'Iniciar viaje'}</Text>
-            </Pressable>
-
-            <View style={{ height: 10 }} />
-
             {isPaused ? (
               <Pressable
                 onPress={async () => {
@@ -1136,6 +1100,36 @@ export default function ActiveTripScreen({ route }) {
 
             {pauseActionError ? (
               <Text style={styles.inlineError}>{pauseActionError}</Text>
+            ) : null}
+
+            <View style={{ height: 10 }} />
+
+            {statusUpper === 'ACCEPTED' ? (
+              <>
+                <Pressable
+                  onPress={async () => {
+                    try {
+                      await setServiceStatus('LOADED');
+                    } catch {
+                      // error ya seteado
+                    }
+                  }}
+                  disabled={statusActionLoading || isPaused}
+                  style={[
+                    styles.primaryBtn,
+                    styles.primaryBtnSuccess,
+                    (statusActionLoading || isPaused) && styles.btnDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryBtnText}>{statusActionLoading ? 'Guardando…' : 'Ya cargué'}</Text>
+                </Pressable>
+
+                {statusActionError ? (
+                  <Text style={styles.inlineError}>{statusActionError}</Text>
+                ) : null}
+
+                <View style={{ height: 10 }} />
+              </>
             ) : null}
           </View>
         </View>
