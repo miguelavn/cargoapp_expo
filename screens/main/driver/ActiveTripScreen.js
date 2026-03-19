@@ -1159,6 +1159,40 @@ export default function ActiveTripScreen({ route }) {
 
                 <View style={{ height: 10 }} />
               </>
+            ) : statusUpper === 'LOADED' ? (
+              <>
+                <Pressable
+                  onPress={async () => {
+                    try {
+                      await setServiceStatus('DELIVERED');
+                      // Servicio finalizado: volver al inicio del conductor
+                      if (navigation?.canGoBack?.()) {
+                        navigation.goBack();
+                      } else {
+                        navigation.navigate('Principal');
+                      }
+                    } catch {
+                      // error ya seteado
+                    }
+                  }}
+                  disabled={statusActionLoading || isPaused}
+                  style={[
+                    styles.primaryBtn,
+                    styles.primaryBtnSuccess,
+                    (statusActionLoading || isPaused) && styles.btnDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {statusActionLoading ? 'Guardando…' : 'Ya entregué'}
+                  </Text>
+                </Pressable>
+
+                {statusActionError ? (
+                  <Text style={styles.inlineError}>{statusActionError}</Text>
+                ) : null}
+
+                <View style={{ height: 10 }} />
+              </>
             ) : null}
           </View>
         </View>
