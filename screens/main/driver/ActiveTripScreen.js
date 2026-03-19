@@ -4,6 +4,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import Constants from 'expo-constants';
+import polyline from '@mapbox/polyline';
 import { COLORS } from '../../../theme/colors';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
@@ -182,41 +183,14 @@ function approxMetersBetween(a, b) {
 
 function decodeGooglePolyline(encoded) {
   if (!encoded) return [];
-  let index = 0;
-  let lat = 0;
-  let lng = 0;
-  const coordinates = [];
-
-  while (index < encoded.length) {
-    let b;
-    let shift = 0;
-    let result = 0;
-
-    do {
-      b = encoded.charCodeAt(index++) - 63;
-      result |= (b & 0x1f) << shift;
-      shift += 5;
-    } while (b >= 0x20);
-
-    const dlat = (result & 1) ? ~(result >> 1) : (result >> 1);
-    lat += dlat;
-
-    shift = 0;
-    result = 0;
-
-    do {
-      b = encoded.charCodeAt(index++) - 63;
-      result |= (b & 0x1f) << shift;
-      shift += 5;
-    } while (b >= 0x20);
-
-    const dlng = (result & 1) ? ~(result >> 1) : (result >> 1);
-    lng += dlng;
-
-    coordinates.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+  try {
+    // @mapbox/polyline decode devuelve [[lat,lng], ...] (NO invertir)
+    const pairs = polyline.decode(encoded);
+    return pairs.map(([lat, lng]) => ({ latitude: Number(lat), longitude: Number(lng) }))
+      .filter((p) => !Number.isNaN(p.latitude) && !Number.isNaN(p.longitude));
+  } catch {
+    return [];
   }
-
-  return coordinates;
 }
 
 export default function ActiveTripScreen({ route }) {
@@ -406,8 +380,8 @@ export default function ActiveTripScreen({ route }) {
   const [driverCoord, setDriverCoord] = useState(null);
   const [isMapReady, setIsMapReady] = useState(false);
   const [locationError, setLocationError] = useState('');
-  const [routeToPickupCoords, setRouteToPickupCoords] = useState([]);
-  const [routeToDropoffCoords, setRouteToDropoffCoords] = useState([]);
+  const [routeToPickup, setRouteToPickup] = useState([]);
+  const [routeToDestination, setRouteToDestination] = useState([]);
   const [tripStarted, setTripStarted] = useState(false);
 
   const fallbackPickupToDropoffCoords = useMemo(() => {
@@ -420,10 +394,11 @@ export default function ActiveTripScreen({ route }) {
     return [driverCoord, originCoord];
   }, [driverCoord, originCoord]);
 
-  const googleDirectionsKey =
-    Constants?.expoConfig?.extra?.googleMapsApiKey ||
-    process.env.EXPO_PUBLIC_GOOGLE_DIRECTIONS_API_KEY ||
+  const googleMapsApiKey =
     process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ||
+    // compat (por si alguien ya configuró la otra variable)
+    process.env.EXPO_PUBLIC_GOOGLE_DIRECTIONS_API_KEY ||
+    Constants?.expoConfig?.extra?.googleMapsApiKey ||
     '';
 
   useEffect(() => {
@@ -433,10 +408,10 @@ export default function ActiveTripScreen({ route }) {
       driverCoord,
       originCoord,
       destinationCoord,
-      hasDirectionsKey: !!googleDirectionsKey,
+      hasDirectionsKey: !!googleMapsApiKey,
       serviceId: routeServiceId,
     });
-  }, [driverCoord, originCoord, destinationCoord, googleDirectionsKey]);
+  }, [driverCoord, originCoord, destinationCoord, googleMapsApiKey]);
 
   // Ubicación del conductor en tiempo real.
   useEffect(() => {
@@ -511,19 +486,20 @@ export default function ActiveTripScreen({ route }) {
     };
   }, []);
 
-  async function fetchDirectionsPolyline({ from, to }) {
+  async function getRoute(from, to) {
     if (!from || !to) return [];
-    if (!googleDirectionsKey) return [from, to];
+    if (!googleMapsApiKey) return [from, to];
 
     const origin = `${from.latitude},${from.longitude}`;
     const destination = `${to.latitude},${to.longitude}`;
     const url =
       `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(origin)}` +
       `&destination=${encodeURIComponent(destination)}` +
-      `&key=${encodeURIComponent(googleDirectionsKey)}`;
+      `&key=${encodeURIComponent(googleMapsApiKey)}`;
 
     const res = await fetch(url);
     const json = await res.json();
+
     const points = json?.routes?.[0]?.overview_polyline?.points;
     const decoded = decodeGooglePolyline(points);
     return decoded?.length ? decoded : [from, to];
@@ -535,24 +511,24 @@ export default function ActiveTripScreen({ route }) {
 
     (async () => {
       if (!originCoord || !destinationCoord) {
-        setRouteToDropoffCoords([]);
+        setRouteToDestination([]);
         return;
       }
       try {
         if (cancelled) return;
-        const coords = await fetchDirectionsPolyline({ from: originCoord, to: destinationCoord });
+        const coords = await getRoute(originCoord, destinationCoord);
         if (cancelled) return;
-        setRouteToDropoffCoords(coords);
+        setRouteToDestination(coords);
       } catch {
         if (cancelled) return;
-        setRouteToDropoffCoords(fallbackPickupToDropoffCoords);
+        setRouteToDestination(fallbackPickupToDropoffCoords);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [originCoord, destinationCoord, fallbackPickupToDropoffCoords, googleDirectionsKey]);
+  }, [originCoord, destinationCoord, fallbackPickupToDropoffCoords, googleMapsApiKey]);
 
   // Ruta: (2) conductor -> recogida (se actualiza con throttle)
   useEffect(() => {
@@ -560,7 +536,7 @@ export default function ActiveTripScreen({ route }) {
 
     (async () => {
       if (!driverCoord || !originCoord) {
-        setRouteToPickupCoords([]);
+        setRouteToPickup([]);
         return;
       }
 
@@ -577,12 +553,12 @@ export default function ActiveTripScreen({ route }) {
       lastDriverRouteFromRef.current = driverCoord;
 
       try {
-        const coords = await fetchDirectionsPolyline({ from: driverCoord, to: originCoord });
+        const coords = await getRoute(driverCoord, originCoord);
         if (cancelled) return;
-        setRouteToPickupCoords(coords);
+        setRouteToPickup(coords);
       } catch {
         if (cancelled) return;
-        setRouteToPickupCoords(fallbackDriverToPickupCoords);
+        setRouteToPickup(fallbackDriverToPickupCoords);
       }
     })();
 
@@ -590,6 +566,37 @@ export default function ActiveTripScreen({ route }) {
       cancelled = true;
     };
   }, [driverCoord, originCoord, fallbackDriverToPickupCoords]);
+
+  // Fit al cargar rutas reales para mostrar el recorrido completo.
+  useEffect(() => {
+    if (!isMapReady) return;
+    if (!mapRef.current) return;
+
+    const a = (routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords) || [];
+    const b = (routeToDestination?.length ? routeToDestination : fallbackPickupToDropoffCoords) || [];
+    const all = [...a, ...b].filter(Boolean);
+    if (all.length < 2) return;
+
+    // Evitar recalcular fit en cada tick mientras el conductor se mueve.
+    if (fitModeRef.current === 'fullRoute') return;
+
+    setTimeout(() => {
+      try {
+        mapRef.current?.fitToCoordinates?.(all, {
+          edgePadding: {
+            top: Math.round(insets.top + 90),
+            right: 40,
+            bottom: Math.round(insets.bottom + 240),
+            left: 40,
+          },
+          animated: true,
+        });
+        fitModeRef.current = 'fullRoute';
+      } catch {
+        // ignore
+      }
+    }, 60);
+  }, [isMapReady, routeToPickup, routeToDestination, fallbackDriverToPickupCoords, fallbackPickupToDropoffCoords, insets.bottom, insets.top]);
 
   // Fit del mapa al entrar.
   // Preferencia:
@@ -706,17 +713,17 @@ export default function ActiveTripScreen({ route }) {
           />
         ) : null}
 
-        {(routeToPickupCoords?.length ? routeToPickupCoords : fallbackDriverToPickupCoords)?.length >= 2 ? (
+        {(routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords)?.length >= 2 ? (
           <Polyline
-            coordinates={routeToPickupCoords?.length ? routeToPickupCoords : fallbackDriverToPickupCoords}
+            coordinates={routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords}
             strokeColor={COLORS.primary}
             strokeWidth={5}
           />
         ) : null}
 
-        {(routeToDropoffCoords?.length ? routeToDropoffCoords : fallbackPickupToDropoffCoords)?.length >= 2 ? (
+        {(routeToDestination?.length ? routeToDestination : fallbackPickupToDropoffCoords)?.length >= 2 ? (
           <Polyline
-            coordinates={routeToDropoffCoords?.length ? routeToDropoffCoords : fallbackPickupToDropoffCoords}
+            coordinates={routeToDestination?.length ? routeToDestination : fallbackPickupToDropoffCoords}
             strokeColor={COLORS.success}
             strokeWidth={4}
           />
