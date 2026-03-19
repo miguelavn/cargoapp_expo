@@ -199,9 +199,23 @@ export function useDriverDashboard(enabled) {
 
 			let activeService = json?.active_service ?? null;
 			// Importante: si Realtime ya colocó un servicio activo pero el dashboard aún no lo incluye,
-			// NO lo borres (esto causaba que “aparezca” 5-10s después).
+			// NO lo borres; PERO evita preservar cuando el backend ya liberó el vehículo.
 			if (!activeService && stateRef.current?.activeService) {
-				activeService = stateRef.current.activeService;
+				const prev = stateRef.current.activeService;
+				const prevId = normalizeId(prev?.service_id ?? prev?.id);
+				const vehicleCurrentId = normalizeId(vehicle?.current_service_id ?? json?.vehicle?.current_service_id);
+				const vehicleAvailable = vehicle?.is_available === true;
+
+				// Si el vehículo ya no tiene servicio actual o ya está disponible, no preserves el servicio previo.
+				if (!vehicleCurrentId || vehicleAvailable) {
+					// no preserve
+				} else {
+					// Preservar solo si coincide con el current_service_id o si el realtime fue muy reciente.
+					const realtimeWasRecent = Date.now() - (lastRealtimeSyncAtRef.current || 0) < 6000;
+					if ((prevId && vehicleCurrentId && prevId === vehicleCurrentId) || realtimeWasRecent) {
+						activeService = prev;
+					}
+				}
 			}
 			// Fallback: si el dashboard no trae active_service, resolverlo directo por driver_id.
 			if (!activeService && appUserIdRef.current != null) {
@@ -292,6 +306,13 @@ export function useDriverDashboard(enabled) {
 
 			// Si el servicio resultó terminal, limpiarlo.
 			if (activeService && isTerminalServiceRow(activeService, statusNameByIdRef.current)) {
+				activeService = null;
+			}
+
+			// Guardia extra: si el vehículo ya quedó disponible y no reporta current_service_id,
+			// nunca mostrar un servicio activo (evita UI stale tras DELIVERED/CANCELED).
+			const finalVehicleCurrentId = normalizeId(vehicle?.current_service_id ?? json?.vehicle?.current_service_id);
+			if (!finalVehicleCurrentId && vehicle?.is_available === true) {
 				activeService = null;
 			}
 
