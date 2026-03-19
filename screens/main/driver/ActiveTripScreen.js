@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import Constants from 'expo-constants';
@@ -212,6 +213,7 @@ function decodeGooglePolyline(encoded) {
 }
 
 export default function ActiveTripScreen({ route }) {
+  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const mapRef = useRef(null);
   const fitModeRef = useRef(null); // 'driverPickup' | 'pickupDropoff'
@@ -446,7 +448,7 @@ export default function ActiveTripScreen({ route }) {
       const row = normalizeServiceRow(res?.data ?? null);
       if (row) {
         setService((prev) => ({ ...prev, ...row }));
-        return;
+        return row;
       }
     } catch {
       // ignore
@@ -458,11 +460,67 @@ export default function ActiveTripScreen({ route }) {
         .select('service_id, status_id, substatus_id, pause_reason_id')
         .eq('service_id', Number(sid))
         .maybeSingle();
-      if (data) setService((prev) => ({ ...prev, ...normalizeServiceRow(data) }));
+      if (data) {
+        const normalized = normalizeServiceRow(data);
+        setService((prev) => ({ ...prev, ...normalized }));
+        return normalized;
+      }
     } catch {
       // ignore
     }
   };
+
+  // Escuchar cambios en el servicio (Realtime) por si el coordinador lo cancela.
+  useEffect(() => {
+    const sid = serviceId;
+    if (!sid) return;
+
+    let unsubscribed = false;
+
+    const channel = supabase
+      .channel(`service-${sid}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'services',
+          filter: `service_id=eq.${Number(sid)}`,
+        },
+        () => {
+          if (unsubscribed) return;
+
+          (async () => {
+            const latest = await refetchService();
+            const statusUpper = String(latest?.status_name || service?.status_name || '').toUpperCase();
+            if (statusUpper === 'CANCELED') {
+              setPauseModalVisible(false);
+              try {
+                if (navigation?.canGoBack?.()) {
+                  navigation.goBack();
+                } else {
+                  navigation.navigate('Principal');
+                }
+              } catch {
+                // ignore
+              }
+            }
+          })();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      unsubscribed = true;
+      try {
+        supabase.removeChannel(channel);
+      } catch {
+        // ignore
+      }
+    };
+    // Ojo: usamos service?.status_name como fallback, pero no re-suscribimos por ese estado.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceId]);
 
   const setServiceSubstatus = async (nextSubstatus, reasonId) => {
     const sid = serviceId;
