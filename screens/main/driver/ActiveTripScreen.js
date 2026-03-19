@@ -395,6 +395,26 @@ export default function ActiveTripScreen({ route }) {
     return String(service?.origin || '—');
   }, [service]);
 
+  const materialText = useMemo(() => {
+    const rawMaterial = service?.material ?? service?.material_name ?? service?.materialName;
+    const materialName = rawMaterial
+      ? (typeof rawMaterial === 'object' ? (rawMaterial?.name ?? '') : String(rawMaterial))
+      : '';
+
+    if (!materialName) return '';
+
+    const rawUnit = service?.unit ?? service?.unit_name ?? service?.unitName;
+    const unitName = rawUnit
+      ? (typeof rawUnit === 'object' ? (rawUnit?.name ?? '') : String(rawUnit))
+      : '';
+
+    const qty = service?.quantity != null && String(service.quantity) !== '' ? String(service.quantity) : '';
+
+    if (qty && unitName) return `${materialName} (${qty} ${unitName})`;
+    if (qty) return `${materialName} (${qty})`;
+    return materialName;
+  }, [service]);
+
   const destinationText = useMemo(() => {
     const raw = service?.destination_address;
     if (typeof raw === 'string') return raw;
@@ -1058,6 +1078,14 @@ export default function ActiveTripScreen({ route }) {
             <Text style={styles.bottomTitle}>Viaje activo</Text>
 
             <View style={{ height: 10 }} />
+
+            {!!materialText && (
+              <>
+                <Text style={styles.label}>Material</Text>
+                <Text style={styles.value} numberOfLines={2}>{materialText}</Text>
+                <View style={{ height: 10 }} />
+              </>
+            )}
 
             <Text style={styles.label}>Origen</Text>
             <Text style={styles.value} numberOfLines={2}>{originText}</Text>
