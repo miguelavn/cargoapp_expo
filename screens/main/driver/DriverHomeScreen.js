@@ -322,6 +322,16 @@ export default function DriverHomeScreen() {
 										<Text style={styles.inlineError}>{serviceActionError}</Text>
 									) : null}
 								</>
+							) : hasNonTerminalActiveService ? (
+								<>
+									<View style={{ height: 12 }} />
+									<Pressable
+										onPress={() => navigation.navigate('ActiveTrip', { serviceId: activeService.service_id, service: activeService })}
+										style={[styles.btn, styles.btnPrimary]}
+									>
+										<Text style={[styles.btnText, styles.btnPrimaryText]}>Reanudar viaje</Text>
+									</Pressable>
+								</>
 							) : null}
 						</>
 					) : (

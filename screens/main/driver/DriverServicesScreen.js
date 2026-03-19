@@ -36,6 +36,11 @@ export default function DriverServicesScreen() {
 			Number(activeService?.status_id) === 1
 		);
 
+	const statusNameUpper = String(activeService?.status_name || '').toUpperCase();
+	const statusIdNumber = Number(activeService?.status_id);
+	const isTerminalById = !Number.isNaN(statusIdNumber) && (statusIdNumber === 4 || statusIdNumber === 5);
+	const hasNonTerminalActiveService = !!activeService && !(statusNameUpper === 'CANCELED' || statusNameUpper === 'DELIVERED' || isTerminalById);
+
 	const playAlert = async () => {
 		try {
 			Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -178,6 +183,16 @@ export default function DriverServicesScreen() {
 								{serviceActionError ? (
 									<Text style={styles.inlineError}>{serviceActionError}</Text>
 								) : null}
+							</>
+						) : hasNonTerminalActiveService ? (
+							<>
+								<View style={{ height: 12 }} />
+								<Pressable
+									onPress={() => navigation.navigate('ActiveTrip', { serviceId: activeService.service_id, service: activeService })}
+									style={[styles.btn, styles.btnPrimary]}
+								>
+									<Text style={[styles.btnText, styles.btnPrimaryText]}>Reanudar viaje</Text>
+								</Pressable>
 							</>
 						) : null}
 					</>
