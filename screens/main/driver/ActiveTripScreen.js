@@ -405,18 +405,10 @@ export default function ActiveTripScreen({ route }) {
   }, [service]);
 
   const materialText = useMemo(() => {
-    const rawMaterial = service?.material ?? service?.material_name ?? service?.materialName;
-    const materialName = rawMaterial
-      ? (typeof rawMaterial === 'object' ? (rawMaterial?.name ?? '') : String(rawMaterial))
-      : '';
-
+    const materialName = String(service?.material_name || '').trim();
     if (!materialName) return '';
 
-    const rawUnit = service?.unit ?? service?.unit_name ?? service?.unitName;
-    const unitName = rawUnit
-      ? (typeof rawUnit === 'object' ? (rawUnit?.name ?? '') : String(rawUnit))
-      : '';
-
+    const unitName = String(service?.unit_name || '').trim();
     const qty = service?.quantity != null && String(service.quantity) !== '' ? String(service.quantity) : '';
 
     if (qty && unitName) return `${materialName} (${qty} ${unitName})`;
