@@ -43,6 +43,7 @@ export function useDriverDashboard(enabled) {
 		deliveredToday: 0,
 		canceledToday: 0,
 	});
+	const [appUserId, setAppUserId] = useState(null);
 
 	const appUserIdRef = useRef(null);
 	const appUserIdReadyRef = useRef(false);
@@ -97,8 +98,8 @@ export function useDriverDashboard(enabled) {
 	}, [state.vehicle]);
 
 	const driverId = useMemo(() => {
-		return normalizeId(state.vehicle?.driver_id) || normalizeId(appUserIdRef.current);
-	}, [state.vehicle]);
+		return normalizeId(state.vehicle?.driver_id) || normalizeId(appUserId);
+	}, [state.vehicle, appUserId]);
 
 	const activeServiceId = useMemo(() => {
 		return normalizeId(state.activeService?.service_id);
@@ -140,6 +141,7 @@ export function useDriverDashboard(enabled) {
 							.maybeSingle();
 						if (!u.error && u.data?.user_id != null) {
 							appUserIdRef.current = u.data.user_id;
+							setAppUserId(u.data.user_id);
 						}
 					}
 				} catch {
@@ -366,6 +368,7 @@ export function useDriverDashboard(enabled) {
 				if (u.error) throw u.error;
 				if (!cancelled && u.data?.user_id != null) {
 					appUserIdRef.current = u.data.user_id;
+					setAppUserId(u.data.user_id);
 				}
 			} catch {
 				// ignore
