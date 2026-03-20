@@ -266,8 +266,12 @@ export default function ActiveTripScreen({ route }) {
         toLatLngFromMaybeGeography(service?.destination_address) ||
         toLatLngFromMaybeGeography(service?.destination)
       );
-      if (hasOrigin && hasDest) {
-        // Aun si ya hay coords, mantener la hidratación desactivada para evitar llamadas innecesarias.
+
+      const hasStatus = !!String(service?.status_name || '').trim() || (service?.status_id != null);
+      const hasMaterial = !!String(service?.material_name || '').trim();
+
+      if (hasOrigin && hasDest && hasStatus && hasMaterial) {
+        // Si ya tenemos lo esencial, evitar llamadas innecesarias.
         return;
       }
 
@@ -454,8 +458,16 @@ export default function ActiveTripScreen({ route }) {
   const serviceId = routeServiceId ?? service?.service_id ?? null;
 
   const statusUpper = useMemo(() => {
-    return String(service?.status_name || '').toUpperCase();
-  }, [service?.status_name]);
+    const raw = String(service?.status_name || '').trim();
+    if (raw) return raw.toUpperCase();
+    const sid = Number(service?.status_id);
+    if (sid === 1) return 'CREATED';
+    if (sid === 2) return 'ACCEPTED';
+    if (sid === 3) return 'LOADED';
+    if (sid === 4) return 'DELIVERED';
+    if (sid === 5) return 'CANCELED';
+    return '';
+  }, [service?.status_name, service?.status_id]);
 
   // El "inicio" del viaje es implícito: al aceptar ya estás en viaje.
   // Usamos LOADED para cambiar el badge a "entregar".

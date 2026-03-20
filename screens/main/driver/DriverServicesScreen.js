@@ -103,7 +103,15 @@ export default function DriverServicesScreen() {
 				timeout: 20000,
 			});
 			if (action === 'accept') {
-				navigation.navigate('ActiveTrip', { serviceId: activeService.service_id, service: activeService });
+				// Optimista: al aceptar, en ActiveTrip debe mostrarse de inmediato "Ya cargué"
+				navigation.navigate('ActiveTrip', {
+					serviceId: activeService.service_id,
+					service: {
+						...activeService,
+						status_id: 2,
+						status_name: 'ACCEPTED',
+					},
+				});
 			}
 			await refetch({ silent: true });
 		} catch (e) {
