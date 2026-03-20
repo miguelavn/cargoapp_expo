@@ -93,7 +93,7 @@ export default function DriverHomeScreen() {
 	const isConnected = useIsOnline();
 	const heartbeatRefetchCooldownRef = useRef(0);
 
-	const heartbeatEnabled = isDriver && vehicle?.is_active === true;
+	const heartbeatEnabled = isDriver && vehicle?.is_active === true && isConnected;
 	const { lastSuccessAt: lastHeartbeatSuccessAt } = useVehicleHeartbeat({
 		enabled: heartbeatEnabled,
 		onSuccess: () => {

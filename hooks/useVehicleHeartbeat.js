@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { callEdgeFunction } from '../api/edgeFunctions';
 
-export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 20000, onSuccess } = {}) {
+export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 45000, onSuccess } = {}) {
 	const intervalRef = useRef(null);
 	const inFlightRef = useRef(false);
 	const [lastSuccessAt, setLastSuccessAt] = useState(0);
@@ -30,7 +30,25 @@ export function useVehicleHeartbeat({ enabled, intervalMs = 10000, timeoutMs = 2
 			if (inFlightRef.current && !force) return;
 			inFlightRef.current = true;
 			try {
-				await callEdgeFunction('driver-heartbeat', { method: 'POST', timeout: timeoutMs });
+				const runOnce = async () => {
+					await callEdgeFunction('driver-heartbeat', { method: 'POST', timeout: timeoutMs });
+				};
+
+				try {
+					await runOnce();
+				} catch (e) {
+					const msg = String(e?.message || '').toLowerCase();
+					const isTimeout = e?.code === 'TIMEOUT' || msg.includes('tiempo de espera');
+					const isNetwork = msg.includes('network') || msg.includes('failed to fetch');
+					// Reintento único para timeouts/red (heartbeat es idempotente)
+					if ((isTimeout || isNetwork) && enabled) {
+						await new Promise((r) => setTimeout(r, 600));
+						await runOnce();
+					} else {
+						throw e;
+					}
+				}
+
 				if (mountedRef.current) setLastSuccessAt(Date.now());
 				try {
 					onSuccess?.();
