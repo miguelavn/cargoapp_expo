@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
@@ -91,7 +91,38 @@ export default function DriverHomeScreen() {
 	const alertSoundLoadingRef = useRef(false);
 	const insets = useSafeAreaInsets();
 	const isConnected = useIsOnline();
+	const prevConnectedRef = useRef(true);
+	const lastReconnectRefetchAtRef = useRef(0);
+	const lastAppActiveRefetchAtRef = useRef(0);
 	const heartbeatRefetchCooldownRef = useRef(0);
+
+	useEffect(() => {
+		const prev = prevConnectedRef.current;
+		prevConnectedRef.current = isConnected;
+		if (!isDriver) return;
+		// Al recuperar conexión, sincronizar (Realtime pudo perder eventos durante el corte)
+		if (!prev && isConnected) {
+			const now = Date.now();
+			if (now - (lastReconnectRefetchAtRef.current || 0) < 4000) return;
+			lastReconnectRefetchAtRef.current = now;
+			refetch?.({ silent: true, force: true });
+		}
+	}, [isConnected, isDriver, refetch]);
+
+	useEffect(() => {
+		if (!isDriver) return;
+		const onAppState = (next) => {
+			if (next !== 'active') return;
+			if (!isConnected) return;
+			const now = Date.now();
+			if (now - (lastAppActiveRefetchAtRef.current || 0) < 4000) return;
+			lastAppActiveRefetchAtRef.current = now;
+			// Al volver desde background, volver a sincronizar (pueden haberse perdido eventos)
+			refetch?.({ silent: true, force: true });
+		};
+		const sub = AppState.addEventListener('change', onAppState);
+		return () => sub.remove();
+	}, [isDriver, isConnected, refetch]);
 
 	const heartbeatEnabled = isDriver && vehicle?.is_active === true && isConnected;
 	const { lastSuccessAt: lastHeartbeatSuccessAt } = useVehicleHeartbeat({
