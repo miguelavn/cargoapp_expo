@@ -7,7 +7,9 @@ import { Audio } from 'expo-av';
 import { COLORS } from '../../../theme/colors';
 import { usePermissions } from '../../../contexts/PermissionsContext';
 import { useDriverDashboard } from '../../../hooks/useDriverDashboard';
+import { useIsOnline } from '../../../hooks/useIsOnline';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
+import { markDriverCanceled, unmarkDriverCanceled } from '../../../services/driverCancelTracker';
 
 function hasPerm(perms = [], needle) {
 	const n = String(needle).toLowerCase();
@@ -26,9 +28,11 @@ export default function DriverServicesScreen() {
 		[permissions]
 	);
 
-	const { loading, error, activeService, refetch } = useDriverDashboard(isDriver);
+	const { loading, error, activeService, pendingOfflineEvents, syncPendingOfflineEvents, refetch } = useDriverDashboard(isDriver);
+	const isConnected = useIsOnline();
 	const [serviceActionLoading, setServiceActionLoading] = useState('');
 	const [serviceActionError, setServiceActionError] = useState('');
+	const [syncingPendingEvents, setSyncingPendingEvents] = useState(false);
 
 	const isServiceRequested =
 		!!activeService && (
@@ -92,20 +96,32 @@ export default function DriverServicesScreen() {
 
 	const respondToService = async (action) => {
 		if (!activeService?.service_id) return;
+		const serviceId = activeService.service_id;
 		const status = action === 'accept' ? 'ACCEPTED' : action === 'cancel' ? 'CANCELED' : null;
 		if (!status) return;
+		if (action === 'accept' && !isConnected) {
+			setServiceActionError('Debes tener conexión para aceptar el servicio');
+			return;
+		}
 		setServiceActionError('');
 		setServiceActionLoading(action);
+		if (action === 'cancel') {
+			markDriverCanceled(serviceId);
+		}
 		try {
 			await callEdgeFunction('driver-service-response', {
 				method: 'POST',
-				body: { service_id: activeService.service_id, status },
+				body: {
+					service_id: serviceId,
+					status,
+					created_at: new Date().toISOString(),
+				},
 				timeout: 20000,
 			});
 			if (action === 'accept') {
 				// Optimista: al aceptar, en ActiveTrip debe mostrarse de inmediato "Ya cargué"
 				navigation.navigate('ActiveTrip', {
-					serviceId: activeService.service_id,
+					serviceId,
 					service: {
 						...activeService,
 						status_id: 2,
@@ -115,6 +131,9 @@ export default function DriverServicesScreen() {
 			}
 			await refetch({ silent: true });
 		} catch (e) {
+			if (action === 'cancel') {
+				unmarkDriverCanceled(serviceId);
+			}
 			setServiceActionError(e?.message || 'No se pudo actualizar el servicio');
 		} finally {
 			setServiceActionLoading('');
@@ -152,6 +171,30 @@ export default function DriverServicesScreen() {
 			]}
 		>
 			<Text style={styles.title}>Servicios</Text>
+			{pendingOfflineEvents > 0 ? (
+				<>
+					<Text style={styles.pendingSyncText}>Eventos pendientes por sincronizar: {pendingOfflineEvents}</Text>
+					{isConnected ? (
+						<Pressable
+							onPress={async () => {
+								if (syncingPendingEvents) return;
+								setSyncingPendingEvents(true);
+								try {
+									await syncPendingOfflineEvents?.({ force: true });
+								} finally {
+									setSyncingPendingEvents(false);
+								}
+							}}
+							style={[styles.retrySyncBtn, syncingPendingEvents && styles.btnDisabled]}
+							disabled={syncingPendingEvents}
+						>
+							<Text style={styles.retrySyncBtnText}>
+								{syncingPendingEvents ? 'Sincronizando…' : 'Reintentar sincronización'}
+							</Text>
+						</Pressable>
+					) : null}
+				</>
+			) : null}
 			<View style={styles.card}>
 				{activeService ? (
 					<>
@@ -199,9 +242,9 @@ export default function DriverServicesScreen() {
 								<View style={{ height: 12 }} />
 								<Pressable
 									onPress={() => navigation.navigate('ActiveTrip', { serviceId: activeService.service_id, service: activeService })}
-									style={[styles.btn, styles.btnPrimary]}
+									style={[styles.btn, styles.btnPrimary, styles.tripModeBtn]}
 								>
-									<Text style={[styles.btnText, styles.btnPrimaryText]}>Reanudar viaje</Text>
+									<Text style={[styles.btnText, styles.btnPrimaryText, styles.tripModeBtnText]}>Entrar en modo viaje</Text>
 								</Pressable>
 							</>
 						) : null}
@@ -218,6 +261,18 @@ const styles = StyleSheet.create({
 	screen: { flex: 1, backgroundColor: COLORS.background, paddingHorizontal: 16, paddingTop: 18, paddingBottom: 100 },
 	center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.background, gap: 10 },
 	title: { color: COLORS.foreground || COLORS.dark, fontSize: 20, fontWeight: '900', marginBottom: 12 },
+	pendingSyncText: { color: '#0A4F80', fontSize: 12, fontWeight: '800', marginBottom: 10 },
+	retrySyncBtn: {
+		marginBottom: 10,
+		alignSelf: 'flex-start',
+		backgroundColor: '#EAF6FF',
+		borderWidth: 1,
+		borderColor: '#8BC8F8',
+		paddingVertical: 7,
+		paddingHorizontal: 10,
+		borderRadius: 8,
+	},
+	retrySyncBtnText: { color: '#0A4F80', fontSize: 12, fontWeight: '900' },
 	card: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, backgroundColor: COLORS.white, padding: 12 },
 	alertBanner: {
 		backgroundColor: COLORS.secondary,
@@ -250,5 +305,7 @@ const styles = StyleSheet.create({
 	btnGhostText: { color: COLORS.foreground || COLORS.dark },
 	btnDisabled: { opacity: 0.6 },
 	btnText: { fontSize: 14, fontWeight: '900' },
+	tripModeBtn: { minHeight: 44 },
+	tripModeBtnText: { color: '#FFFFFF', textAlign: 'center' },
 	inlineError: { marginTop: 10, color: COLORS.danger, fontSize: 13, fontWeight: '800' },
 });

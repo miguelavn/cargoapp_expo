@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { callEdgeFunction } from '../api/edgeFunctions';
+import * as Notifications from 'expo-notifications';
+import * as Haptics from 'expo-haptics';
+import { Audio } from 'expo-av';
+import { consumeDriverCanceled } from '../services/driverCancelTracker';
+import { useIsOnline } from './useIsOnline';
+import {
+	clearPersistedActiveTrip,
+	getOfflineEventsCount,
+	persistActiveTrip,
+	syncOfflineEventsQueue,
+} from '../services/offlineTrip';
 
 function normalizeId(val) {
 	if (val === null || val === undefined) return null;
@@ -34,7 +45,25 @@ function isTerminalServiceRow(row, statusNameById) {
 	return TERMINAL_SERVICE_STATUSES.has(name);
 }
 
+function isIgnorableQueueSyncError(error) {
+	const msg = String(error?.message || error || '').toLowerCase();
+	if (!msg) return false;
+	return (
+		msg.includes('duplicate') ||
+		msg.includes('already processed') ||
+		msg.includes('already applied') ||
+		msg.includes('already exists') ||
+		msg.includes('ya existe') ||
+		msg.includes('ya fue') ||
+		msg.includes('ya se encuentra') ||
+		msg.includes('same status') ||
+		msg.includes('unique constraint') ||
+		msg.includes('conflict')
+	);
+}
+
 export function useDriverDashboard(enabled) {
+	const isOnline = useIsOnline();
 	const [state, setState] = useState({
 		loading: false,
 		error: '',
@@ -43,6 +72,7 @@ export function useDriverDashboard(enabled) {
 		deliveredToday: 0,
 		canceledToday: 0,
 	});
+	const [pendingOfflineEvents, setPendingOfflineEvents] = useState(0);
 	const [appUserId, setAppUserId] = useState(null);
 
 	const appUserIdRef = useRef(null);
@@ -110,6 +140,67 @@ export function useDriverDashboard(enabled) {
 	const pendingRefetchRef = useRef(false);
 	const pendingSilentRef = useRef(null);
 	const lastRealtimeSyncAtRef = useRef(0);
+	const queueSyncInFlightRef = useRef(false);
+	const queueLastSyncAtRef = useRef(0);
+
+	// Notificaciones locales por Realtime (evitar duplicados)
+	const lastServiceIdRef = useRef(null);
+	const notifiedKeysRef = useRef(new Set());
+	const notifiedKeysOrderRef = useRef([]);
+
+	const markNotified = (key) => {
+		const k = String(key || '');
+		if (!k) return;
+		if (notifiedKeysRef.current.has(k)) return;
+		notifiedKeysRef.current.add(k);
+		notifiedKeysOrderRef.current.push(k);
+		// Limitar crecimiento (evita leaks en sesiones largas)
+		if (notifiedKeysOrderRef.current.length > 60) {
+			const toRemove = notifiedKeysOrderRef.current.splice(0, 20);
+			for (const r of toRemove) notifiedKeysRef.current.delete(r);
+		}
+	};
+
+	const notifyLocalService = useCallback(async ({ title, body, serviceId }) => {
+		try {
+			const sid = serviceId != null ? Number(serviceId) : null;
+			if (!sid || Number.isNaN(sid)) return;
+
+			try {
+				await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+			} catch {
+				// ignore
+			}
+
+			// Sonido existente del proyecto (si falla, no bloquear)
+			try {
+				const { sound } = await Audio.Sound.createAsync(
+					require('../assets/sounds/notification.wav'),
+					{ shouldPlay: true }
+				);
+				setTimeout(() => {
+					try {
+						sound?.unloadAsync?.();
+					} catch {
+						// ignore
+					}
+				}, 2500);
+			} catch {
+				// ignore
+			}
+
+			await Notifications.scheduleNotificationAsync({
+				content: {
+					title: title || 'Nuevo servicio',
+					body: body || 'Tienes un nuevo servicio disponible',
+					data: { service_id: sid },
+				},
+				trigger: null,
+			});
+		} catch {
+			// ignore
+		}
+	}, []);
 
 	const refetch = useCallback(async ({ silent = false, force = false } = {}) => {
 		if (!enabled) return;
@@ -329,6 +420,15 @@ export function useDriverDashboard(enabled) {
 			});
 		} catch (e) {
 			if (!mountedRef.current) return;
+			if (!isOnline) {
+				// En offline no bloquear el dashboard con error global.
+				setState((s) => ({
+					...s,
+					loading: false,
+					error: '',
+				}));
+				return;
+			}
 			setState((s) => ({
 				...s,
 				loading: false,
@@ -385,6 +485,114 @@ export function useDriverDashboard(enabled) {
 		if (!enabled) return;
 		refetch({ silent: false });
 	}, [enabled, refetch]);
+
+	const refreshOfflineQueueCount = useCallback(async () => {
+		try {
+			const count = await getOfflineEventsCount();
+			if (mountedRef.current) setPendingOfflineEvents(count);
+		} catch {
+			// ignore
+		}
+	}, []);
+
+	const runOfflineQueueSync = useCallback(async ({ force = false } = {}) => {
+		if (!enabled) return { processed: 0, remaining: pendingOfflineEvents, skipped: true };
+		if (!isOnline) return { processed: 0, remaining: pendingOfflineEvents, skipped: true };
+
+		let freshCount = pendingOfflineEvents;
+		try {
+			freshCount = await getOfflineEventsCount();
+			if (mountedRef.current && freshCount !== pendingOfflineEvents) {
+				setPendingOfflineEvents(freshCount);
+			}
+		} catch {
+			// ignore
+		}
+
+		if (!force && freshCount <= 0) return { processed: 0, remaining: 0, skipped: true };
+		if (queueSyncInFlightRef.current) return { processed: 0, remaining: pendingOfflineEvents, skipped: true };
+
+		const now = Date.now();
+		if (!force && now - (queueLastSyncAtRef.current || 0) < 1500) {
+			return { processed: 0, remaining: pendingOfflineEvents, skipped: true };
+		}
+		queueLastSyncAtRef.current = now;
+
+		queueSyncInFlightRef.current = true;
+		try {
+			const result = await syncOfflineEventsQueue(async (ev) => {
+				try {
+					await callEdgeFunction('driver-service-response', {
+						method: 'POST',
+						body: {
+							service_id: Number(ev?.service_id),
+							status: ev?.status || undefined,
+							substatus: ev?.substatus || undefined,
+							pause_reason_id: ev?.pause_reason_id ?? undefined,
+							created_at: ev?.created_at || new Date().toISOString(),
+						},
+						timeout: 20000,
+					});
+				} catch (e) {
+					if (isIgnorableQueueSyncError(e)) return;
+					throw e;
+				}
+			});
+
+			if (mountedRef.current) {
+				setPendingOfflineEvents(result?.remaining || 0);
+			}
+
+			if ((result?.processed || 0) > 0) {
+				refetch({ silent: true, force: true });
+			}
+
+			return result;
+		} catch (e) {
+			return { processed: 0, remaining: freshCount, skipped: false, error: e };
+		} finally {
+			queueSyncInFlightRef.current = false;
+			refreshOfflineQueueCount();
+		}
+	}, [enabled, isOnline, pendingOfflineEvents, refetch, refreshOfflineQueueCount]);
+
+	useEffect(() => {
+		if (!enabled) return;
+		refreshOfflineQueueCount();
+	}, [enabled, refreshOfflineQueueCount]);
+
+	useEffect(() => {
+		if (!enabled) return;
+
+		const active = state.activeService;
+		const sid = normalizeId(active?.service_id ?? active?.id);
+		const status = normalizeStatusNameFromRow(active, statusNameByIdRef.current);
+		const isTerminal = TERMINAL_SERVICE_STATUSES.has(status);
+
+		(async () => {
+			try {
+				if (!active || !sid || isTerminal) {
+					await clearPersistedActiveTrip();
+					return;
+				}
+
+				await persistActiveTrip({
+					active_service_id: active?.service_id ?? active?.id,
+					service: active,
+					status,
+					substatus: String(active?.substatus_name || '').toUpperCase(),
+				});
+			} catch {
+				// ignore
+			}
+		})();
+	}, [enabled, state.activeService]);
+
+	useEffect(() => {
+		if (!enabled) return;
+		if (!isOnline) return;
+		runOfflineQueueSync();
+	}, [enabled, isOnline, runOfflineQueueSync]);
 
 	// Realtime: si cambia el vehículo del conductor, actualizar localmente.
 	useEffect(() => {
@@ -445,6 +653,53 @@ export function useDriverDashboard(enabled) {
 	useEffect(() => {
 		if (!enabled || !driverId) return;
 
+		const shouldNotifyNewService = (row, eventType) => {
+			if (!row) return false;
+			if (eventType !== 'INSERT' && eventType !== 'UPDATE') return false;
+			const statusUpper = normalizeStatusNameFromRow(row, statusNameByIdRef.current);
+			if (statusUpper !== 'CREATED') return false;
+			const sid = normalizeId(row?.service_id ?? row?.id);
+			if (!sid) return false;
+			if (lastServiceIdRef.current && String(lastServiceIdRef.current) === String(sid)) return false;
+			return true;
+		};
+
+		const maybeNotify = async (row, eventType) => {
+			if (!row) return;
+			const sid = normalizeId(row?.service_id ?? row?.id);
+			if (!sid) return;
+			const statusUpper = normalizeStatusNameFromRow(row, statusNameByIdRef.current);
+
+			// 1) NUEVO SERVICIO
+			if (shouldNotifyNewService(row, eventType)) {
+				lastServiceIdRef.current = sid;
+				markNotified(`${sid}:CREATED`);
+				await notifyLocalService({
+					title: 'Nuevo servicio',
+					body: 'Tienes un nuevo servicio disponible',
+					serviceId: sid,
+				});
+				return;
+			}
+
+			// 2) BONUS: CANCELADO (una vez por servicio)
+			if (statusUpper === 'CANCELED') {
+				// Si el conductor canceló/rechazó desde el frontend, no mostrar una notificación
+				// que diga "El coordinador canceló".
+				if (consumeDriverCanceled(sid)) return;
+
+				const key = `${sid}:CANCELED`;
+				if (!notifiedKeysRef.current.has(key)) {
+					markNotified(key);
+					await notifyLocalService({
+						title: 'Servicio cancelado',
+						body: 'El coordinador canceló el servicio',
+						serviceId: sid,
+					});
+				}
+			}
+		};
+
 		const applyServiceRowToState = (row) => {
 			if (!row) return;
 			const serviceId = normalizeId(row?.service_id ?? row?.id);
@@ -487,6 +742,7 @@ export function useDriverDashboard(enabled) {
 				{ event: '*', schema: 'public', table: 'services', filter: `driver_id=eq.${driverId}` },
 				(payload) => {
 					const row = (payload?.eventType === 'DELETE' ? payload?.old : payload?.new) || null;
+					maybeNotify(row, payload?.eventType);
 					// 1) Reacción inmediata en UI
 					applyServiceRowToState(row);
 					// 2) Sync completo (detalles + stats) en background
@@ -498,7 +754,7 @@ export function useDriverDashboard(enabled) {
 		return () => {
 			supabase.removeChannel(channel);
 		};
-	}, [enabled, driverId, refetch]);
+	}, [enabled, driverId, notifyLocalService, refetch]);
 
 	// Realtime (respaldo): detectar cambios en services por vehicle_id.
 	// Útil cuando el coordinador crea el servicio y aún no existe driver_id.
@@ -592,6 +848,8 @@ export function useDriverDashboard(enabled) {
 		activeService: state.activeService,
 		deliveredToday: state.deliveredToday,
 		canceledToday: state.canceledToday,
+		pendingOfflineEvents,
+		syncPendingOfflineEvents: runOfflineQueueSync,
 		refetch,
 		setAvailability,
 	};

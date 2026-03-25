@@ -1,5 +1,8 @@
 import { registerRootComponent } from 'expo';
 
+// Instala filtros de consola en dev ANTES de cargar el resto de la app.
+import './setupDevConsoleFilters';
+
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

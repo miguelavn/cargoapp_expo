@@ -3,6 +3,7 @@ import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
+import { useNetInfo } from '@react-native-community/netinfo';
 import * as Location from 'expo-location';
 import Constants from 'expo-constants';
 import polyline from '@mapbox/polyline';
@@ -10,6 +11,49 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { COLORS } from '../../../theme/colors';
 import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
+import { sendLocalNotification } from '../../../services/notifications';
+import { consumeDriverCanceled, markDriverCanceled, unmarkDriverCanceled } from '../../../services/driverCancelTracker';
+import {
+  clearPersistedActiveTrip,
+  enqueueOfflineEvent,
+  getOfflineEventsCount,
+  getPersistedActiveTrip,
+  persistActiveTrip,
+  syncOfflineEventsQueue,
+} from '../../../services/offlineTrip';
+
+function getStatusUpperFromService(service) {
+  const raw = String(service?.status_name || '').trim();
+  if (raw) return raw.toUpperCase();
+  const sid = Number(service?.status_id);
+  if (sid === 1) return 'CREATED';
+  if (sid === 2) return 'ACCEPTED';
+  if (sid === 3) return 'LOADED';
+  if (sid === 4) return 'DELIVERED';
+  if (sid === 5) return 'CANCELED';
+  return '';
+}
+
+function getStatusDisplayName(statusUpper) {
+  const s = String(statusUpper || '').toUpperCase();
+  if (s === 'CREATED') return 'Creado';
+  if (s === 'ACCEPTED') return 'Aceptado';
+  if (s === 'LOADED') return 'Cargado';
+  if (s === 'DELIVERED') return 'Entregado';
+  if (s === 'CANCELED') return 'Cancelado';
+  return '—';
+}
+
+function isTerminalStatus(statusUpper) {
+  const s = String(statusUpper || '').toUpperCase();
+  return s === 'DELIVERED' || s === 'CANCELED';
+}
+
+function isServicePaused(service) {
+  const sub = String(service?.substatus_name || '').toUpperCase();
+  if (sub === 'PAUSED') return true;
+  return service?.pause_reason_id != null;
+}
 
 function normalizeServiceRow(row) {
   if (!row || typeof row !== 'object') return row;
@@ -212,6 +256,23 @@ function decodeGooglePolyline(encoded) {
   }
 }
 
+function isIgnorableQueueSyncError(error) {
+  const msg = String(error?.message || error || '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('duplicate') ||
+    msg.includes('already processed') ||
+    msg.includes('already applied') ||
+    msg.includes('already exists') ||
+    msg.includes('ya existe') ||
+    msg.includes('ya fue') ||
+    msg.includes('ya se encuentra') ||
+    msg.includes('same status') ||
+    msg.includes('unique constraint') ||
+    msg.includes('conflict')
+  );
+}
+
 export default function ActiveTripScreen({ route }) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
@@ -221,6 +282,12 @@ export default function ActiveTripScreen({ route }) {
   const lastDriverCoordRef = useRef(null);
   const lastDriverRouteFetchAtRef = useRef(0);
   const lastDriverRouteFromRef = useRef(null);
+  const prevServiceIdRef = useRef(null);
+  const cachedPickupServiceIdRef = useRef(null);
+  const cachedDestinationServiceIdRef = useRef(null);
+
+  const exitOnceRef = useRef(false);
+  const netInfo = useNetInfo();
 
   const routeServiceId = route?.params?.serviceId ?? route?.params?.service?.service_id ?? null;
   const [service, setService] = useState(route?.params?.service || null);
@@ -228,6 +295,19 @@ export default function ActiveTripScreen({ route }) {
   useEffect(() => {
     setService(route?.params?.service || null);
   }, [route?.params?.service]);
+
+  const refreshOfflineQueueCount = async () => {
+    try {
+      const count = await getOfflineEventsCount();
+      setPendingOfflineEvents(Number(count) || 0);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    refreshOfflineQueueCount();
+  }, []);
 
   const originCoord = useMemo(() => {
     return (
@@ -244,6 +324,43 @@ export default function ActiveTripScreen({ route }) {
       toLatLngFromMaybeGeography(service?.destination)
     );
   }, [service]);
+
+  // Restaurar viaje/cache desde almacenamiento local para soportar relanzar sin internet.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const sid = routeServiceId ?? service?.service_id;
+      if (!sid) return;
+      try {
+        const trip = await getPersistedActiveTrip();
+        if (!trip || String(trip?.active_service_id || '') !== String(sid)) return;
+        if (cancelled) return;
+
+        if (trip?.service && !service) {
+          setService((prev) => ({ ...prev, ...trip.service }));
+        }
+
+        const cachedPickup = Array.isArray(trip?.cachedRouteToPickup) ? trip.cachedRouteToPickup : [];
+        const cachedDestination = Array.isArray(trip?.cachedRouteToDestination) ? trip.cachedRouteToDestination : [];
+
+        if (cachedPickup.length >= 2) {
+          setCachedRouteToPickup(cachedPickup);
+          setRouteToPickup(cachedPickup);
+          cachedPickupServiceIdRef.current = sid;
+        }
+        if (cachedDestination.length >= 2) {
+          setCachedRouteToDestination(cachedDestination);
+          setRouteToDestination(cachedDestination);
+          cachedDestinationServiceIdRef.current = sid;
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [routeServiceId, service?.service_id]);
 
   // Si el servicio que llega por navegación no trae coordenadas (ej: viene del driver-dashboard),
   // hidratarlo vía Supabase (RLS) usando service_id.
@@ -433,6 +550,8 @@ export default function ActiveTripScreen({ route }) {
   const [locationError, setLocationError] = useState('');
   const [routeToPickup, setRouteToPickup] = useState([]);
   const [routeToDestination, setRouteToDestination] = useState([]);
+  const [cachedRouteToPickup, setCachedRouteToPickup] = useState(null);
+  const [cachedRouteToDestination, setCachedRouteToDestination] = useState(null);
   const [tripStarted, setTripStarted] = useState(false);
   const [trackMarkerChanges, setTrackMarkerChanges] = useState(true);
   const [truckImageOk, setTruckImageOk] = useState(true);
@@ -445,6 +564,17 @@ export default function ActiveTripScreen({ route }) {
 
   const [statusActionLoading, setStatusActionLoading] = useState(false);
   const [statusActionError, setStatusActionError] = useState('');
+  const [routeRecalcLoading, setRouteRecalcLoading] = useState(false);
+  const [pendingOfflineEvents, setPendingOfflineEvents] = useState(0);
+  const [isSyncingOfflineEvents, setIsSyncingOfflineEvents] = useState(false);
+  const offlineSyncInFlightRef = useRef(false);
+  const routeToPickupRef = useRef([]);
+
+  const actionBusy = pauseActionLoading || statusActionLoading;
+
+  useEffect(() => {
+    routeToPickupRef.current = Array.isArray(routeToPickup) ? routeToPickup : [];
+  }, [routeToPickup]);
 
   // react-native-maps (especialmente en Android) puede no renderizar
   // correctamente Markers con children si tracksViewChanges=false desde el inicio.
@@ -456,18 +586,41 @@ export default function ActiveTripScreen({ route }) {
   }, [driverCoord, originCoord, destinationCoord]);
 
   const serviceId = routeServiceId ?? service?.service_id ?? null;
+  const serviceIdStr = serviceId == null ? '' : String(serviceId);
+
+  const isConnected = netInfo?.isConnected;
+  const isInternetReachable = netInfo?.isInternetReachable;
+  const isOnline = isConnected === true && isInternetReachable !== false;
+
+  useEffect(() => {
+    if (!serviceId) return;
+    const status = getStatusUpperFromService(service);
+    const substatus = String(service?.substatus_name || '').toUpperCase();
+
+    (async () => {
+      try {
+        if (status === 'DELIVERED' || status === 'CANCELED') {
+          await clearPersistedActiveTrip();
+          return;
+        }
+
+        await persistActiveTrip({
+          active_service_id: serviceId,
+          service,
+          status,
+          substatus,
+          cachedRouteToPickup,
+          cachedRouteToDestination,
+        });
+      } catch {
+        // ignore
+      }
+    })();
+  }, [serviceId, service, cachedRouteToPickup, cachedRouteToDestination]);
 
   const statusUpper = useMemo(() => {
-    const raw = String(service?.status_name || '').trim();
-    if (raw) return raw.toUpperCase();
-    const sid = Number(service?.status_id);
-    if (sid === 1) return 'CREATED';
-    if (sid === 2) return 'ACCEPTED';
-    if (sid === 3) return 'LOADED';
-    if (sid === 4) return 'DELIVERED';
-    if (sid === 5) return 'CANCELED';
-    return '';
-  }, [service?.status_name, service?.status_id]);
+    return getStatusUpperFromService(service);
+  }, [service]);
 
   // El "inicio" del viaje es implícito: al aceptar ya estás en viaje.
   // Usamos LOADED para cambiar el badge a "entregar".
@@ -477,11 +630,98 @@ export default function ActiveTripScreen({ route }) {
 
   const canCoordinatorCancel = statusUpper === '' || statusUpper === 'CREATED' || statusUpper === 'ACCEPTED';
 
-  const isPaused = useMemo(() => {
-    const sub = String(service?.substatus_name || '').toUpperCase();
-    if (sub === 'PAUSED') return true;
-    return service?.pause_reason_id != null;
-  }, [service?.substatus_name, service?.pause_reason_id]);
+  const isPaused = useMemo(() => isServicePaused(service), [service]);
+
+  const pauseReasonText = useMemo(() => {
+    const rid = service?.pause_reason_id;
+    if (rid == null) return '';
+    const found = Array.isArray(pauseReasons)
+      ? pauseReasons.find((r) => String(r?.id) === String(rid))
+      : null;
+    const name = String(found?.name || '').trim();
+    if (name) return name;
+    return '—';
+  }, [service?.pause_reason_id, pauseReasons]);
+
+  const isTerminal = isTerminalStatus(statusUpper);
+  const canAccept = statusUpper === 'CREATED';
+  const canReject = statusUpper === 'CREATED';
+  const canPause = !isTerminal && !isPaused && (statusUpper === 'ACCEPTED' || statusUpper === 'LOADED');
+  const canResume = !isTerminal && isPaused && (statusUpper === 'ACCEPTED' || statusUpper === 'LOADED');
+  const canLoad = !isTerminal && !isPaused && statusUpper === 'ACCEPTED';
+  const canDeliver = !isTerminal && !isPaused && statusUpper === 'LOADED';
+  const showCompactActionRow = canPause && (canLoad || canDeliver);
+
+  const hasCachedPickupForCurrentService = useMemo(() => {
+    if (!Array.isArray(cachedRouteToPickup) || cachedRouteToPickup.length < 2) return false;
+    return String(cachedPickupServiceIdRef.current || '') === serviceIdStr;
+  }, [cachedRouteToPickup, serviceIdStr]);
+
+  const hasCachedDestinationForCurrentService = useMemo(() => {
+    if (!Array.isArray(cachedRouteToDestination) || cachedRouteToDestination.length < 2) return false;
+    return String(cachedDestinationServiceIdRef.current || '') === serviceIdStr;
+  }, [cachedRouteToDestination, serviceIdStr]);
+
+  // Si cambia de servicio, limpiar cache/rutas para evitar mezclar polylines de otro viaje.
+  useEffect(() => {
+    const prev = prevServiceIdRef.current == null ? '' : String(prevServiceIdRef.current);
+    if (prev && prev !== serviceIdStr) {
+      setRouteToPickup([]);
+      setRouteToDestination([]);
+      setCachedRouteToPickup(null);
+      setCachedRouteToDestination(null);
+      cachedPickupServiceIdRef.current = null;
+      cachedDestinationServiceIdRef.current = null;
+      lastDriverRouteFetchAtRef.current = 0;
+      lastDriverRouteFromRef.current = null;
+    }
+    prevServiceIdRef.current = serviceId;
+  }, [serviceId, serviceIdStr]);
+
+  const cancelNotifiedForServiceIdRef = useRef('');
+
+  useEffect(() => {
+    if (statusUpper !== 'CANCELED') return;
+    const sid = serviceId;
+    if (!sid) return;
+
+    // Si el conductor canceló/rechazó, no mostrar una notificación que diga "coordinador".
+    if (consumeDriverCanceled(sid)) return;
+
+    // Evitar duplicados en la misma pantalla.
+    if (String(cancelNotifiedForServiceIdRef.current) === String(sid)) return;
+    cancelNotifiedForServiceIdRef.current = String(sid);
+
+    // Notificación local visible incluso en foreground (via NotificationHandler).
+    sendLocalNotification({
+      title: 'Servicio cancelado',
+      body: 'El coordinador canceló el servicio',
+      data: { service_id: sid },
+    });
+  }, [statusUpper, serviceId]);
+
+  useEffect(() => {
+    // Auto-salida en estados terminales.
+    if (exitOnceRef.current) return;
+    if (!isTerminal) return;
+
+    exitOnceRef.current = true;
+    setPauseModalVisible(false);
+
+    const t = setTimeout(() => {
+      try {
+        if (navigation?.canGoBack?.()) {
+          navigation.goBack();
+        } else {
+          navigation.navigate('Principal');
+        }
+      } catch {
+        // ignore
+      }
+    }, 350);
+
+    return () => clearTimeout(t);
+  }, [isTerminal, navigation]);
 
   const refetchService = async () => {
     const sid = serviceId;
@@ -518,6 +758,16 @@ export default function ActiveTripScreen({ route }) {
     }
   };
 
+  // Sincronización inicial: aunque venga un servicio con status "stale", enganchar rápido.
+  const initialSyncTriedRef = useRef(false);
+  useEffect(() => {
+    if (!serviceId) return;
+    if (initialSyncTriedRef.current) return;
+    initialSyncTriedRef.current = true;
+    refetchService();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceId]);
+
   // Escuchar cambios en el servicio (Realtime) por si el coordinador lo cancela.
   useEffect(() => {
     const sid = serviceId;
@@ -541,20 +791,8 @@ export default function ActiveTripScreen({ route }) {
           if (unsubscribed) return;
 
           (async () => {
-            const latest = await refetchService();
-            const latestUpper = String(latest?.status_name || '').toUpperCase();
-            if (latestUpper === 'CANCELED') {
-              setPauseModalVisible(false);
-              try {
-                if (navigation?.canGoBack?.()) {
-                  navigation.goBack();
-                } else {
-                  navigation.navigate('Principal');
-                }
-              } catch {
-                // ignore
-              }
-            }
+            await refetchService();
+            // La salida terminal se maneja en el efecto por statusUpper.
           })();
         }
       )
@@ -575,12 +813,33 @@ export default function ActiveTripScreen({ route }) {
   const setServiceSubstatus = async (nextSubstatus, reasonId) => {
     const sid = serviceId;
     if (!sid) return;
-    if (pauseActionLoading) return;
+    if (actionBusy) return;
 
     setPauseActionError('');
+    const next = String(nextSubstatus || '').toUpperCase();
+    const pauseReasonId = next === 'PAUSED' ? reasonId : null;
+
+    if (!isOnline) {
+      await enqueueOfflineEvent({
+        service_id: Number(sid),
+        status: null,
+        substatus: next,
+        pause_reason_id: pauseReasonId,
+        created_at: new Date().toISOString(),
+      });
+
+      setService((prev) => ({
+        ...prev,
+        substatus_name: next,
+        pause_reason_id: pauseReasonId,
+      }));
+      setPauseModalVisible(false);
+      refreshOfflineQueueCount();
+      return;
+    }
+
     setPauseActionLoading(true);
     try {
-      const next = String(nextSubstatus || '').toUpperCase();
       const body = {
         service_id: Number(sid),
         substatus: next,
@@ -595,9 +854,19 @@ export default function ActiveTripScreen({ route }) {
 
       await callEdgeFunction('driver-service-response', {
         method: 'POST',
-        body,
+        body: {
+          ...body,
+          created_at: new Date().toISOString(),
+        },
         timeout: 20000,
       });
+
+      // Optimista: actualizar UI inmediatamente tras éxito.
+      setService((prev) => ({
+        ...prev,
+        substatus_name: next,
+        pause_reason_id: next === 'PAUSED' ? reasonId : null,
+      }));
 
       await refetchService();
     } catch (e) {
@@ -611,20 +880,75 @@ export default function ActiveTripScreen({ route }) {
   const setServiceStatus = async (nextStatus) => {
     const sid = serviceId;
     if (!sid) return;
-    if (statusActionLoading) return;
+    if (actionBusy) return;
+
+    const next = String(nextStatus || '').toUpperCase();
+
+    if (!isOnline && next === 'ACCEPTED') {
+      setStatusActionError('Debes tener conexión para aceptar el servicio');
+      return;
+    }
+
+    if (!isOnline && (next === 'LOADED' || next === 'DELIVERED')) {
+      await enqueueOfflineEvent({
+        service_id: Number(sid),
+        status: next,
+        substatus: null,
+        pause_reason_id: null,
+        created_at: new Date().toISOString(),
+      });
+
+      setService((prev) => ({
+        ...prev,
+        status_name: next,
+        status_id: next === 'LOADED' ? 3 : 4,
+      }));
+
+      setStatusActionError('');
+      refreshOfflineQueueCount();
+      return;
+    }
 
     setStatusActionError('');
     setStatusActionLoading(true);
+    const isDriverCancel = next === 'CANCELED';
+    if (isDriverCancel) {
+      markDriverCanceled(sid);
+    }
     try {
-      const next = String(nextStatus || '').toUpperCase();
       await callEdgeFunction('driver-service-response', {
         method: 'POST',
-        body: { service_id: Number(sid), status: next },
+        body: {
+          service_id: Number(sid),
+          status: next,
+          created_at: new Date().toISOString(),
+        },
         timeout: 20000,
       });
 
+      // Optimista: actualizar UI inmediatamente tras éxito.
+      setService((prev) => ({
+        ...prev,
+        status_name: next,
+        status_id:
+          next === 'CREATED'
+            ? 1
+            : next === 'ACCEPTED'
+              ? 2
+              : next === 'LOADED'
+                ? 3
+                : next === 'DELIVERED'
+                  ? 4
+                  : next === 'CANCELED'
+                    ? 5
+                    : prev?.status_id,
+      }));
+
       await refetchService();
     } catch (e) {
+      if (isDriverCancel) {
+        unmarkDriverCanceled(sid);
+      }
       setStatusActionError(e?.message || 'No se pudo actualizar el estado');
       throw e;
     } finally {
@@ -663,6 +987,63 @@ export default function ActiveTripScreen({ route }) {
     if (!driverCoord || !originCoord) return [];
     return [driverCoord, originCoord];
   }, [driverCoord, originCoord]);
+
+  const effectiveRouteToPickup = useMemo(() => {
+    if (!isOnline && hasCachedPickupForCurrentService) return cachedRouteToPickup;
+    if (routeToPickup?.length >= 2) return routeToPickup;
+    return fallbackDriverToPickupCoords;
+  }, [isOnline, hasCachedPickupForCurrentService, cachedRouteToPickup, routeToPickup, fallbackDriverToPickupCoords]);
+
+  const effectiveRouteToDestination = useMemo(() => {
+    if (!isOnline && hasCachedDestinationForCurrentService) return cachedRouteToDestination;
+    if (routeToDestination?.length >= 2) return routeToDestination;
+    return fallbackPickupToDropoffCoords;
+  }, [isOnline, hasCachedDestinationForCurrentService, cachedRouteToDestination, routeToDestination, fallbackPickupToDropoffCoords]);
+
+  const isShowingCachedRouteOffline = !isOnline && (hasCachedPickupForCurrentService || hasCachedDestinationForCurrentService);
+
+  useEffect(() => {
+    if (!isOnline) return;
+    if (pendingOfflineEvents <= 0) return;
+    if (offlineSyncInFlightRef.current) return;
+
+    offlineSyncInFlightRef.current = true;
+    setIsSyncingOfflineEvents(true);
+
+    (async () => {
+      try {
+        const result = await syncOfflineEventsQueue(async (ev) => {
+          try {
+            await callEdgeFunction('driver-service-response', {
+              method: 'POST',
+              body: {
+                service_id: Number(ev?.service_id),
+                status: ev?.status || undefined,
+                substatus: ev?.substatus || undefined,
+                pause_reason_id: ev?.pause_reason_id ?? undefined,
+                created_at: ev?.created_at || new Date().toISOString(),
+              },
+              timeout: 20000,
+            });
+          } catch (e) {
+            if (isIgnorableQueueSyncError(e)) return;
+            throw e;
+          }
+        });
+
+        setPendingOfflineEvents(result?.remaining || 0);
+        if ((result?.processed || 0) > 0) {
+          await refetchService();
+        }
+      } catch {
+        // ignore
+      } finally {
+        offlineSyncInFlightRef.current = false;
+        setIsSyncingOfflineEvents(false);
+        refreshOfflineQueueCount();
+      }
+    })();
+  }, [isOnline, pendingOfflineEvents]);
 
   const googleMapsApiKey =
     process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ||
@@ -816,6 +1197,67 @@ export default function ActiveTripScreen({ route }) {
     return decoded?.length ? decoded : [from, to];
   }
 
+  const recalculateRoutesManually = async () => {
+    if (routeRecalcLoading || actionBusy) return;
+    if (!isOnline) {
+      setStatusActionError('Sin conexión: no se pueden recalcular rutas');
+      return;
+    }
+
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const isDetailedRoute = (coords) => Array.isArray(coords) && coords.length > 2;
+
+    setStatusActionError('');
+    setRouteRecalcLoading(true);
+    try {
+      // 1) Recalcular A -> B
+      if (originCoord && destinationCoord) {
+        const destCoords = await getRoute(originCoord, destinationCoord);
+        if (Array.isArray(destCoords) && destCoords.length >= 2) {
+          setRouteToDestination(destCoords);
+          if (destCoords.length > 2) {
+            setCachedRouteToDestination(destCoords);
+            cachedDestinationServiceIdRef.current = serviceId;
+          }
+        }
+      }
+
+      // 2) Recalcular conductor -> A con reintentos cortos
+      if (driverCoord && originCoord) {
+        let pickupCoords = await getRoute(driverCoord, originCoord);
+        if (!isDetailedRoute(pickupCoords)) {
+          for (let i = 0; i < 2; i += 1) {
+            await wait(900 + i * 500);
+            const retry = await getRoute(driverCoord, originCoord);
+            if (isDetailedRoute(retry)) {
+              pickupCoords = retry;
+              break;
+            }
+            if ((retry?.length || 0) > (pickupCoords?.length || 0)) {
+              pickupCoords = retry;
+            }
+          }
+        }
+
+        if (isDetailedRoute(pickupCoords)) {
+          setRouteToPickup(pickupCoords);
+          setCachedRouteToPickup(pickupCoords);
+          cachedPickupServiceIdRef.current = serviceId;
+        } else if (hasCachedPickupForCurrentService) {
+          setRouteToPickup(cachedRouteToPickup);
+        } else {
+          setRouteToPickup(fallbackDriverToPickupCoords);
+        }
+      }
+    } catch {
+      if (hasCachedPickupForCurrentService) {
+        setRouteToPickup(cachedRouteToPickup);
+      }
+    } finally {
+      setRouteRecalcLoading(false);
+    }
+  };
+
   // Ruta: (1) recogida -> entrega (una vez)
   useEffect(() => {
     let cancelled = false;
@@ -825,13 +1267,31 @@ export default function ActiveTripScreen({ route }) {
         setRouteToDestination([]);
         return;
       }
+
+      if (!isOnline) {
+        if (hasCachedDestinationForCurrentService) {
+          setRouteToDestination(cachedRouteToDestination);
+          return;
+        }
+        setRouteToDestination(fallbackPickupToDropoffCoords);
+        return;
+      }
+
       try {
         if (cancelled) return;
         const coords = await getRoute(originCoord, destinationCoord);
         if (cancelled) return;
         setRouteToDestination(coords);
+        if (Array.isArray(coords) && coords.length >= 2) {
+          setCachedRouteToDestination(coords);
+          cachedDestinationServiceIdRef.current = serviceId;
+        }
       } catch {
         if (cancelled) return;
+        if (hasCachedDestinationForCurrentService) {
+          setRouteToDestination(cachedRouteToDestination);
+          return;
+        }
         setRouteToDestination(fallbackPickupToDropoffCoords);
       }
     })();
@@ -839,15 +1299,44 @@ export default function ActiveTripScreen({ route }) {
     return () => {
       cancelled = true;
     };
-  }, [originCoord, destinationCoord, fallbackPickupToDropoffCoords, googleMapsApiKey]);
+  }, [originCoord, destinationCoord, fallbackPickupToDropoffCoords, googleMapsApiKey, isOnline, serviceId]);
 
   // Ruta: (2) conductor -> recogida (se actualiza con throttle)
   useEffect(() => {
     let cancelled = false;
 
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const isDetailedRoute = (coords) => Array.isArray(coords) && coords.length > 2;
+
+    const getDriverToPickupRouteWithRetry = async (from, to) => {
+      // Primer intento inmediato
+      let best = await getRoute(from, to);
+      if (isDetailedRoute(best)) return best;
+
+      // Reintentos cortos para casos transitorios de Directions (latencia/route warm-up)
+      for (let i = 0; i < 2; i += 1) {
+        await wait(900 + i * 500);
+        const retry = await getRoute(from, to);
+        if (isDetailedRoute(retry)) return retry;
+        if ((retry?.length || 0) > (best?.length || 0)) best = retry;
+      }
+
+      return best;
+    };
+
     (async () => {
       if (!driverCoord || !originCoord) {
         setRouteToPickup([]);
+        return;
+      }
+
+      if (!isOnline) {
+        if (hasCachedPickupForCurrentService) {
+          setRouteToPickup(cachedRouteToPickup);
+          return;
+        }
+        setRouteToPickup(fallbackDriverToPickupCoords);
         return;
       }
 
@@ -864,17 +1353,45 @@ export default function ActiveTripScreen({ route }) {
       lastDriverRouteFromRef.current = driverCoord;
 
       try {
-        const coords = await getRoute(driverCoord, originCoord);
+        const coords = await getDriverToPickupRouteWithRetry(driverCoord, originCoord);
         if (cancelled) return;
-        if (__DEV__ && (coords?.length || 0) <= 2) {
+
+        const detailed = isDetailedRoute(coords);
+
+        if (__DEV__ && !detailed) {
           // eslint-disable-next-line no-console
           console.warn('[ActiveTrip] Ruta conductor→recogida sin detalle (línea recta). Posible ZERO_RESULTS/coord fuera de vía.', {
             coordsLen: coords?.length || 0,
           });
         }
-        setRouteToPickup(coords);
+
+        if (detailed) {
+          setRouteToPickup(coords);
+          setCachedRouteToPickup(coords);
+          cachedPickupServiceIdRef.current = serviceId;
+          return;
+        }
+
+        // Si no vino detalle, no degradar UX reemplazando una ruta buena ya dibujada.
+        if (Array.isArray(routeToPickupRef.current) && routeToPickupRef.current.length > 2) {
+          return;
+        }
+
+        if (hasCachedPickupForCurrentService) {
+          setRouteToPickup(cachedRouteToPickup);
+          return;
+        }
+
+        setRouteToPickup(fallbackDriverToPickupCoords);
       } catch {
         if (cancelled) return;
+        if (Array.isArray(routeToPickupRef.current) && routeToPickupRef.current.length > 2) {
+          return;
+        }
+        if (hasCachedPickupForCurrentService) {
+          setRouteToPickup(cachedRouteToPickup);
+          return;
+        }
         setRouteToPickup(fallbackDriverToPickupCoords);
       }
     })();
@@ -882,15 +1399,15 @@ export default function ActiveTripScreen({ route }) {
     return () => {
       cancelled = true;
     };
-  }, [driverCoord, originCoord, fallbackDriverToPickupCoords]);
+  }, [driverCoord, originCoord, fallbackDriverToPickupCoords, isOnline, serviceId]);
 
   // Fit al cargar rutas reales para mostrar el recorrido completo.
   useEffect(() => {
     if (!isMapReady) return;
     if (!mapRef.current) return;
 
-    const a = (routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords) || [];
-    const b = (routeToDestination?.length ? routeToDestination : fallbackPickupToDropoffCoords) || [];
+    const a = effectiveRouteToPickup || [];
+    const b = effectiveRouteToDestination || [];
     const all = [...a, ...b].filter(Boolean);
     if (all.length < 2) return;
 
@@ -913,7 +1430,7 @@ export default function ActiveTripScreen({ route }) {
         // ignore
       }
     }, 60);
-  }, [isMapReady, routeToPickup, routeToDestination, fallbackDriverToPickupCoords, fallbackPickupToDropoffCoords, insets.bottom, insets.top]);
+  }, [isMapReady, effectiveRouteToPickup, effectiveRouteToDestination, insets.bottom, insets.top]);
 
   // Fit del mapa al entrar.
   // Preferencia:
@@ -977,9 +1494,11 @@ export default function ActiveTripScreen({ route }) {
 
   const badgeText = locationError
     ? locationError
-    : isPaused
-      ? 'Servicio pausado'
-      : (tripStarted ? 'En camino a entregar' : 'En camino a recoger');
+    : isTerminal
+      ? (statusUpper === 'DELIVERED' ? 'Servicio entregado' : 'Servicio cancelado')
+      : isPaused
+        ? 'Servicio pausado'
+        : (tripStarted ? 'En camino a entregar' : 'En camino a recoger');
 
   return (
     <View style={styles.screen}>
@@ -1062,17 +1581,17 @@ export default function ActiveTripScreen({ route }) {
           </Marker>
         ) : null}
 
-        {(routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords)?.length >= 2 ? (
+        {effectiveRouteToPickup?.length >= 2 ? (
           <Polyline
-            coordinates={routeToPickup?.length ? routeToPickup : fallbackDriverToPickupCoords}
+            coordinates={effectiveRouteToPickup}
             strokeColor={COLORS.primary}
             strokeWidth={5}
           />
         ) : null}
 
-        {(routeToDestination?.length ? routeToDestination : fallbackPickupToDropoffCoords)?.length >= 2 ? (
+        {effectiveRouteToDestination?.length >= 2 ? (
           <Polyline
-            coordinates={routeToDestination?.length ? routeToDestination : fallbackPickupToDropoffCoords}
+            coordinates={effectiveRouteToDestination}
             strokeColor={COLORS.success}
             strokeWidth={4}
           />
@@ -1084,6 +1603,20 @@ export default function ActiveTripScreen({ route }) {
           <View style={styles.topBadge}>
             <Text style={styles.topBadgeText}>{badgeText}</Text>
           </View>
+          {pendingOfflineEvents > 0 ? (
+            <View style={styles.pendingEventsBadge}>
+              <Text style={styles.pendingEventsBadgeText}>
+                {isSyncingOfflineEvents
+                  ? `Sincronizando ${pendingOfflineEvents} evento(s)…`
+                  : `Eventos pendientes por sincronizar: ${pendingOfflineEvents}`}
+              </Text>
+            </View>
+          ) : null}
+          {isShowingCachedRouteOffline ? (
+            <View style={styles.offlineRouteBadge}>
+              <Text style={styles.offlineRouteBadgeText}>Sin conexión: mostrando última ruta disponible</Text>
+            </View>
+          ) : null}
         </View>
 
         <View style={[styles.bottomCardWrap, { paddingBottom: insets.bottom + 14 }]} pointerEvents="box-none">
@@ -1108,94 +1641,180 @@ export default function ActiveTripScreen({ route }) {
             <Text style={styles.label}>Destino</Text>
             <Text style={styles.value} numberOfLines={2}>{destinationText}</Text>
 
+            <View style={{ height: 10 }} />
+
+            <Text style={styles.modalMuted}>Estado: {getStatusDisplayName(statusUpper)}</Text>
+            {isPaused ? (
+              <Text style={styles.modalMuted}>Razón de pausa: {pauseReasonText}</Text>
+            ) : null}
+
             <View style={{ height: 12 }} />
 
-            {isPaused ? (
+            <Pressable
+              onPress={recalculateRoutesManually}
+              disabled={routeRecalcLoading || actionBusy || !isOnline}
+              style={[
+                styles.recalcBtn,
+                (routeRecalcLoading || actionBusy || !isOnline) && styles.btnDisabled,
+              ]}
+            >
+              <MaterialCommunityIcons name="routes" size={16} color="#0A4F80" />
+              <Text style={styles.recalcBtnText}>
+                {routeRecalcLoading ? 'Recalculando rutas…' : 'Recalcular rutas'}
+              </Text>
+            </Pressable>
+
+            <View style={{ height: 12 }} />
+
+            {canResume ? (
               <Pressable
                 onPress={async () => {
+                  if (actionBusy) return;
                   try {
                     await setServiceSubstatus('ACTIVED');
                   } catch {
                     // error ya seteado
                   }
                 }}
-                disabled={pauseActionLoading}
-                style={[styles.primaryBtn, styles.primaryBtnSuccess, pauseActionLoading && styles.btnDisabled]}
+                disabled={actionBusy}
+                style={[styles.primaryBtn, styles.primaryBtnSuccess, actionBusy && styles.btnDisabled]}
               >
-                <Text style={styles.primaryBtnText}>{pauseActionLoading ? 'Reanudando…' : 'Reanudar servicio'}</Text>
+                <Text style={styles.primaryBtnText}>
+                  {actionBusy ? 'Reanudando…' : 'Reanudar servicio'}
+                </Text>
               </Pressable>
-            ) : (
+            ) : showCompactActionRow ? (
+              <View style={styles.btnRow}>
+                <Pressable
+                  onPress={() => {
+                    if (actionBusy) return;
+                    setPauseActionError('');
+                    setPauseModalVisible(true);
+                  }}
+                  disabled={actionBusy}
+                  style={[styles.primaryBtn, styles.primaryBtnGhost, styles.btnRowLeft, actionBusy && styles.btnDisabled]}
+                >
+                  <Text style={[styles.primaryBtnText, styles.primaryBtnGhostText]}>
+                    {actionBusy ? 'Procesando…' : 'Pausar servicio'}
+                  </Text>
+                </Pressable>
+
+                {canLoad ? (
+                  <Pressable
+                    onPress={async () => {
+                      if (actionBusy) return;
+                      try {
+                        await setServiceStatus('LOADED');
+                      } catch {
+                        // error ya seteado
+                      }
+                    }}
+                    disabled={actionBusy}
+                    style={[styles.primaryBtn, styles.primaryBtnSuccess, styles.btnRowRight, actionBusy && styles.btnDisabled]}
+                  >
+                    <Text style={styles.primaryBtnText}>{actionBusy ? 'Guardando…' : 'Ya cargué'}</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    onPress={async () => {
+                      if (actionBusy) return;
+                      try {
+                        await setServiceStatus('DELIVERED');
+                      } catch {
+                        // error ya seteado
+                      }
+                    }}
+                    disabled={actionBusy}
+                    style={[styles.primaryBtn, styles.primaryBtnSuccess, styles.btnRowRight, actionBusy && styles.btnDisabled]}
+                  >
+                    <Text style={styles.primaryBtnText}>{actionBusy ? 'Guardando…' : 'Ya entregué'}</Text>
+                  </Pressable>
+                )}
+              </View>
+            ) : canPause ? (
               <Pressable
                 onPress={() => {
+                  if (actionBusy) return;
                   setPauseActionError('');
                   setPauseModalVisible(true);
                 }}
-                disabled={pauseActionLoading}
-                style={[styles.primaryBtn, styles.primaryBtnGhost, pauseActionLoading && styles.btnDisabled]}
+                disabled={actionBusy}
+                style={[styles.primaryBtn, styles.primaryBtnGhost, actionBusy && styles.btnDisabled]}
               >
                 <Text style={[styles.primaryBtnText, styles.primaryBtnGhostText]}>
-                  {pauseActionLoading ? 'Procesando…' : 'Pausar servicio'}
+                  {actionBusy ? 'Procesando…' : 'Pausar servicio'}
                 </Text>
               </Pressable>
-            )}
+            ) : null}
 
             {pauseActionError ? (
               <Text style={styles.inlineError}>{pauseActionError}</Text>
             ) : null}
 
-            <View style={{ height: 10 }} />
+            {(canResume || canPause) ? <View style={{ height: 10 }} /> : null}
 
-            {statusUpper === 'ACCEPTED' ? (
+            {isTerminal ? null : canAccept || canReject ? (
+              <>
+                {canAccept ? (
+                  <Pressable
+                    onPress={async () => {
+                      if (actionBusy) return;
+                      try {
+                        await setServiceStatus('ACCEPTED');
+                      } catch {
+                        // error ya seteado
+                      }
+                    }}
+                    disabled={actionBusy}
+                    style={[styles.primaryBtn, styles.primaryBtnSuccess, actionBusy && styles.btnDisabled]}
+                  >
+                    <Text style={styles.primaryBtnText}>
+                      {actionBusy ? 'Guardando…' : 'Aceptar servicio'}
+                    </Text>
+                  </Pressable>
+                ) : null}
+
+                <View style={{ height: 10 }} />
+
+                {canReject ? (
+                  <Pressable
+                    onPress={async () => {
+                      if (actionBusy) return;
+                      try {
+                        await setServiceStatus('CANCELED');
+                      } catch {
+                        // error ya seteado
+                      }
+                    }}
+                    disabled={actionBusy}
+                    style={[styles.primaryBtn, styles.primaryBtnDanger, actionBusy && styles.btnDisabled]}
+                  >
+                    <Text style={styles.primaryBtnText}>
+                      {actionBusy ? 'Guardando…' : 'Rechazar servicio'}
+                    </Text>
+                  </Pressable>
+                ) : null}
+
+                {statusActionError ? (
+                  <Text style={styles.inlineError}>{statusActionError}</Text>
+                ) : null}
+              </>
+            ) : showCompactActionRow ? null : canLoad ? (
               <>
                 <Pressable
                   onPress={async () => {
+                    if (actionBusy) return;
                     try {
                       await setServiceStatus('LOADED');
                     } catch {
                       // error ya seteado
                     }
                   }}
-                  disabled={statusActionLoading || isPaused}
-                  style={[
-                    styles.primaryBtn,
-                    styles.primaryBtnSuccess,
-                    (statusActionLoading || isPaused) && styles.btnDisabled,
-                  ]}
-                >
-                  <Text style={styles.primaryBtnText}>{statusActionLoading ? 'Guardando…' : 'Ya cargué'}</Text>
-                </Pressable>
-
-                {statusActionError ? (
-                  <Text style={styles.inlineError}>{statusActionError}</Text>
-                ) : null}
-
-                <View style={{ height: 10 }} />
-              </>
-            ) : statusUpper === 'LOADED' ? (
-              <>
-                <Pressable
-                  onPress={async () => {
-                    try {
-                      await setServiceStatus('DELIVERED');
-                      // Servicio finalizado: volver al inicio del conductor
-                      if (navigation?.canGoBack?.()) {
-                        navigation.goBack();
-                      } else {
-                        navigation.navigate('Principal');
-                      }
-                    } catch {
-                      // error ya seteado
-                    }
-                  }}
-                  disabled={statusActionLoading || isPaused}
-                  style={[
-                    styles.primaryBtn,
-                    styles.primaryBtnSuccess,
-                    (statusActionLoading || isPaused) && styles.btnDisabled,
-                  ]}
+                  disabled={actionBusy}
+                  style={[styles.primaryBtn, styles.primaryBtnSuccess, actionBusy && styles.btnDisabled]}
                 >
                   <Text style={styles.primaryBtnText}>
-                    {statusActionLoading ? 'Guardando…' : 'Ya entregué'}
+                    {actionBusy ? 'Guardando…' : 'Ya cargué'}
                   </Text>
                 </Pressable>
 
@@ -1205,6 +1824,35 @@ export default function ActiveTripScreen({ route }) {
 
                 <View style={{ height: 10 }} />
               </>
+            ) : canDeliver ? (
+              <>
+                <Pressable
+                  onPress={async () => {
+                    if (actionBusy) return;
+                    try {
+                      await setServiceStatus('DELIVERED');
+                    } catch {
+                      // error ya seteado
+                    }
+                  }}
+                  disabled={actionBusy}
+                  style={[styles.primaryBtn, styles.primaryBtnSuccess, actionBusy && styles.btnDisabled]}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {actionBusy ? 'Guardando…' : 'Ya entregué'}
+                  </Text>
+                </Pressable>
+
+                {statusActionError ? (
+                  <Text style={styles.inlineError}>{statusActionError}</Text>
+                ) : null}
+
+                <View style={{ height: 10 }} />
+              </>
+            ) : null}
+
+            {showCompactActionRow && statusActionError ? (
+              <Text style={styles.inlineError}>{statusActionError}</Text>
             ) : null}
           </View>
         </View>
@@ -1227,6 +1875,7 @@ export default function ActiveTripScreen({ route }) {
                   <Pressable
                     key={String(r?.id)}
                     onPress={async () => {
+                      if (actionBusy) return;
                       try {
                         await setServiceSubstatus('PAUSED', r?.id);
                         setPauseModalVisible(false);
@@ -1234,8 +1883,11 @@ export default function ActiveTripScreen({ route }) {
                         // mantener abierto si falla
                       }
                     }}
-                    disabled={pauseActionLoading}
-                    style={[styles.reasonRow, pauseActionLoading && styles.btnDisabled]}
+                    disabled={actionBusy}
+                    style={[
+                      styles.reasonRow,
+                      actionBusy && styles.btnDisabled,
+                    ]}
                   >
                     <Text style={styles.reasonText}>{String(r?.name || '—')}</Text>
                   </Pressable>
@@ -1249,8 +1901,8 @@ export default function ActiveTripScreen({ route }) {
 
             <Pressable
               onPress={() => setPauseModalVisible(false)}
-              disabled={pauseActionLoading}
-              style={[styles.primaryBtn, styles.primaryBtnGhost, pauseActionLoading && styles.btnDisabled]}
+              disabled={actionBusy}
+              style={[styles.primaryBtn, styles.primaryBtnGhost, actionBusy && styles.btnDisabled]}
             >
               <Text style={[styles.primaryBtnText, styles.primaryBtnGhostText]}>Cancelar</Text>
             </Pressable>
@@ -1319,6 +1971,34 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '900',
   },
+  offlineRouteBadge: {
+    marginTop: 8,
+    backgroundColor: '#FFF4E5',
+    borderWidth: 1,
+    borderColor: '#F0B15A',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  offlineRouteBadgeText: {
+    color: '#8A4B08',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  pendingEventsBadge: {
+    marginTop: 8,
+    backgroundColor: '#EAF6FF',
+    borderWidth: 1,
+    borderColor: '#8BC8F8',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  pendingEventsBadgeText: {
+    color: '#0A4F80',
+    fontSize: 12,
+    fontWeight: '800',
+  },
 
   bottomCardWrap: {
     position: 'absolute',
@@ -1351,6 +2031,24 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
+  recalcBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#8BC8F8',
+    backgroundColor: '#EAF6FF',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  recalcBtnText: {
+    color: '#0A4F80',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+
   primaryBtn: {
     backgroundColor: COLORS.primary,
     borderRadius: 12,
@@ -1376,6 +2074,17 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 14,
     fontWeight: '900',
+  },
+
+  btnRow: {
+    flexDirection: 'row',
+  },
+  btnRowLeft: {
+    flex: 1,
+    marginRight: 10,
+  },
+  btnRowRight: {
+    flex: 1,
   },
 
   btnDisabled: { opacity: 0.6 },

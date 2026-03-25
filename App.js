@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Text, View, Pressable } from 'react-native';
 import { useFonts } from 'expo-font';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import RegisterUserScreen from './screens/main/users/RegisterUserScreen';
@@ -31,7 +31,15 @@ import { usePermissions } from './contexts/PermissionsContext';
 import { supabase } from './supabaseClient';
 import { COLORS } from './theme/colors';
 
+import {
+  ensureLocalNotificationsAsync,
+  setupNotificationListeners,
+} from './services/notifications';
+import { getPersistedActiveTrip } from './services/offlineTrip';
+
 const Tab = createBottomTabNavigator();
+
+const navigationRef = createNavigationContainerRef();
 
 function hasPermission(perms = [], perm) {
   if (!perm) return false;
@@ -129,23 +137,111 @@ export default function App() {
   // Control de estado de sesión global para navegación condicional inicial
   const [initialRoute, setInitialRoute] = React.useState('Login');
   const sessionCheckedRef = React.useRef(false);
+  const activeTripRestoreAttemptedRef = React.useRef(false);
+
+  const restoreActiveTripIfAny = React.useCallback(async () => {
+    if (activeTripRestoreAttemptedRef.current) return;
+    activeTripRestoreAttemptedRef.current = true;
+
+    try {
+      const trip = await getPersistedActiveTrip();
+      const sid = trip?.active_service_id;
+      if (!sid) return;
+
+      const serviceId = Number(sid);
+      if (!serviceId || Number.isNaN(serviceId)) return;
+
+      const navAction = () => {
+        try {
+          if (navigationRef?.isReady?.()) {
+            navigationRef.navigate('ActiveTrip', {
+              serviceId,
+              service: trip?.service || undefined,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      };
+
+      if (navigationRef?.isReady?.()) {
+        navAction();
+      } else if (!pendingNavActionRef.current) {
+        pendingNavActionRef.current = navAction;
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   React.useEffect(() => {
     let mounted = true;
     // Cargar sesión al inicio
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
-      if (data.session) setInitialRoute('Principal');
+      if (data.session) {
+        setInitialRoute('Principal');
+        restoreActiveTripIfAny();
+      }
       sessionCheckedRef.current = true;
     });
     // Listener de cambios de auth
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!mounted) return;
       setInitialRoute(session ? 'Principal' : 'Login');
+      if (session) {
+        restoreActiveTripIfAny();
+      }
     });
     return () => {
       mounted = false;
       listener?.subscription?.unsubscribe();
+    };
+  }, [restoreActiveTripIfAny]);
+
+  // Push Notifications (solo frontend): permisos + token + listeners (1 vez)
+  const pendingNavActionRef = React.useRef(null);
+  React.useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      await ensureLocalNotificationsAsync();
+    })();
+
+    const cleanup = setupNotificationListeners({
+      onNotificationResponse: (response) => {
+        if (!mounted) return;
+
+        const data = response?.notification?.request?.content?.data || {};
+        const rawServiceId = data?.service_id ?? data?.serviceId ?? null;
+        const serviceId = rawServiceId != null ? Number(rawServiceId) : null;
+        if (!serviceId || Number.isNaN(serviceId)) return;
+
+        const navAction = () => {
+          try {
+            if (navigationRef?.isReady?.()) {
+              navigationRef.navigate('ActiveTrip', { serviceId });
+            }
+          } catch {
+            // ignore
+          }
+        };
+
+        if (navigationRef?.isReady?.()) {
+          navAction();
+        } else {
+          pendingNavActionRef.current = navAction;
+        }
+      },
+    });
+
+    return () => {
+      mounted = false;
+      try {
+        cleanup?.();
+      } catch {
+        // ignore
+      }
     };
   }, []);
 
@@ -156,7 +252,18 @@ export default function App() {
   return (
     <PermissionsProvider>
       <SafeAreaProvider>
-      <NavigationContainer>
+      <NavigationContainer
+        ref={navigationRef}
+        onReady={() => {
+          const action = pendingNavActionRef.current;
+          pendingNavActionRef.current = null;
+          try {
+            action?.();
+          } catch {
+            // ignore
+          }
+        }}
+      >
         <Stack.Navigator initialRouteName={initialRoute}>
         <Stack.Screen 
           name="Login" 
