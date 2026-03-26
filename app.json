@@ -19,9 +19,12 @@
       }
     },
     "android": {
+      "package": "com.cargoapp.driver",
+      "versionCode": 1,
       "permissions": [
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION"
+        "ACCESS_FINE_LOCATION",
+        "INTERNET"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
@@ -35,6 +38,11 @@
     },
     "plugins": [
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "c7b71fba-29ac-48e9-8e55-26827ec05da9"
+      }
+    }
   }
 }
