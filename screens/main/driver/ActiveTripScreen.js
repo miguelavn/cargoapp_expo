@@ -1026,9 +1026,11 @@ export default function ActiveTripScreen({ route }) {
               timeout: 20000,
             });
           } catch (e) {
-            if (isIgnorableQueueSyncError(e)) return;
+            if (isIgnorableQueueSyncError(e)) return { ack: true };
             throw e;
           }
+
+          return { ack: true };
         });
 
         setPendingOfflineEvents(result?.remaining || 0);

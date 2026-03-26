@@ -143,7 +143,13 @@ export async function syncOfflineEventsQueue(sendEventFn) {
     while (queue.length > 0) {
       const ev = queue[0];
       try {
-        await sendEventFn(ev);
+        const res = await sendEventFn(ev);
+        // Permitir que el caller marque un error como "ack" (idempotente) para
+        // removerlo de la cola aunque el backend responda "duplicate".
+        if (res && typeof res === 'object' && res.ack === false) {
+          // explícitamente no ack: cortar para reintentar luego
+          break;
+        }
       } catch (e) {
         lastError = e;
         break;
