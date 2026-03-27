@@ -136,7 +136,7 @@ export default function App() {
 
   // Control de estado de sesión global para navegación condicional inicial
   const [initialRoute, setInitialRoute] = React.useState('Login');
-  const sessionCheckedRef = React.useRef(false);
+  const [authReady, setAuthReady] = React.useState(false);
   const activeTripRestoreAttemptedRef = React.useRef(false);
 
   const restoreActiveTripIfAny = React.useCallback(async () => {
@@ -179,11 +179,12 @@ export default function App() {
     // Cargar sesión al inicio
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
-      if (data.session) {
-        setInitialRoute('Principal');
+      const hasSession = !!data?.session;
+      setInitialRoute(hasSession ? 'Principal' : 'Login');
+      if (hasSession) {
         restoreActiveTripIfAny();
       }
-      sessionCheckedRef.current = true;
+      setAuthReady(true);
     });
     // Listener de cambios de auth
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -249,6 +250,10 @@ export default function App() {
     return <View style={{ flex: 1, backgroundColor: COLORS.background }} />;
   }
 
+  if (!authReady) {
+    return <View style={{ flex: 1, backgroundColor: COLORS.background }} />;
+  }
+
   return (
     <PermissionsProvider>
       <SafeAreaProvider>
@@ -264,7 +269,7 @@ export default function App() {
           }
         }}
       >
-        <Stack.Navigator initialRouteName={initialRoute}>
+        <Stack.Navigator key={`root-${initialRoute}`} initialRouteName={initialRoute}>
         <Stack.Screen 
           name="Login" 
           component={LoginScreen} 
