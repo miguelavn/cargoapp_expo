@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -277,7 +277,9 @@ export default function ActiveTripScreen({ route }) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const mapRef = useRef(null);
-  const fitModeRef = useRef(null); // 'driverPickup' | 'pickupDropoff'
+  const fitModeRef = useRef(null); // 'fullRoute' | 'fullRouteMarkers' | 'driverOnly'
+  const userMapGestureRef = useRef(false);
+  const programmaticCameraRef = useRef(false);
   const locationSubRef = useRef(null);
   const lastDriverCoordRef = useRef(null);
   const lastDriverRouteFetchAtRef = useRef(0);
@@ -567,6 +569,7 @@ export default function ActiveTripScreen({ route }) {
   const [routeRecalcLoading, setRouteRecalcLoading] = useState(false);
   const [pendingOfflineEvents, setPendingOfflineEvents] = useState(0);
   const [isSyncingOfflineEvents, setIsSyncingOfflineEvents] = useState(false);
+  const [showRecenterMapBtn, setShowRecenterMapBtn] = useState(false);
   const offlineSyncInFlightRef = useRef(false);
   const routeToPickupRef = useRef([]);
 
@@ -674,6 +677,8 @@ export default function ActiveTripScreen({ route }) {
       cachedDestinationServiceIdRef.current = null;
       lastDriverRouteFetchAtRef.current = 0;
       lastDriverRouteFromRef.current = null;
+      fitModeRef.current = null;
+      setShowRecenterMapBtn(false);
     }
     prevServiceIdRef.current = serviceId;
   }, [serviceId, serviceIdStr]);
@@ -1403,96 +1408,115 @@ export default function ActiveTripScreen({ route }) {
     };
   }, [driverCoord, originCoord, fallbackDriverToPickupCoords, isOnline, serviceId]);
 
-  // Fit al cargar rutas reales para mostrar el recorrido completo.
-  useEffect(() => {
-    if (!isMapReady) return;
-    if (!mapRef.current) return;
+  const mapFitEdgePadding = useMemo(() => ({
+    top: Math.round(insets.top + 120),
+    right: 50,
+    bottom: Math.round(insets.bottom + 300),
+    left: 50,
+  }), [insets.bottom, insets.top]);
 
-    const a = effectiveRouteToPickup || [];
-    const b = effectiveRouteToDestination || [];
-    const all = [...a, ...b].filter(Boolean);
-    if (all.length < 2) return;
+  const hasRouteGeometry = useMemo(() => {
+    return (effectiveRouteToPickup?.length || 0) >= 2 || (effectiveRouteToDestination?.length || 0) >= 2;
+  }, [effectiveRouteToDestination, effectiveRouteToPickup]);
 
-    // Evitar recalcular fit en cada tick mientras el conductor se mueve.
-    if (fitModeRef.current === 'fullRoute') return;
+  const mapFocusCoords = useMemo(() => {
+    const byKey = new Map();
 
-    setTimeout(() => {
-      try {
-        mapRef.current?.fitToCoordinates?.(all, {
-          edgePadding: {
-            top: Math.round(insets.top + 90),
-            right: 40,
-            bottom: Math.round(insets.bottom + 240),
-            left: 40,
-          },
-          animated: true,
-        });
-        fitModeRef.current = 'fullRoute';
-      } catch {
-        // ignore
+    const pushPoint = (p) => {
+      if (!p) return;
+      const lat = Number(p.latitude);
+      const lng = Number(p.longitude);
+      if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+      if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+      const key = `${lat.toFixed(6)},${lng.toFixed(6)}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, { latitude: lat, longitude: lng });
       }
-    }, 60);
-  }, [isMapReady, effectiveRouteToPickup, effectiveRouteToDestination, insets.bottom, insets.top]);
+    };
 
-  // Fit del mapa al entrar.
-  // Preferencia:
-  // - si ya tengo ubicación del conductor y origen: enfocar conductor + recogida
-  // - si no: origen + destino
-  useEffect(() => {
-    if (!isMapReady) return;
-    if (!mapRef.current) return;
+    pushPoint(driverCoord);
+    pushPoint(originCoord);
+    pushPoint(destinationCoord);
 
-    const canFitDriverPickup = !!(driverCoord && originCoord);
-    const canFitPickupDropoff = !!(originCoord && destinationCoord);
-    if (!canFitDriverPickup && !canFitPickupDropoff) return;
+    if (Array.isArray(effectiveRouteToPickup)) {
+      effectiveRouteToPickup.forEach(pushPoint);
+    }
+    if (Array.isArray(effectiveRouteToDestination)) {
+      effectiveRouteToDestination.forEach(pushPoint);
+    }
 
-    // Si primero hicimos fit a pickup+dropoff, cuando llegue GPS hacemos "upgrade" a driver+pickup.
-    if (fitModeRef.current === 'driverPickup') return;
+    return Array.from(byKey.values());
+  }, [driverCoord, destinationCoord, effectiveRouteToDestination, effectiveRouteToPickup, originCoord]);
 
-    const nextMode = canFitDriverPickup ? 'driverPickup' : 'pickupDropoff';
-    if (fitModeRef.current && fitModeRef.current === nextMode) return;
+  const fitTripToRouteView = useCallback(({ animated = true, force = false } = {}) => {
+    if (!isMapReady || !mapRef.current) return false;
 
-    const coords = canFitDriverPickup ? [driverCoord, originCoord] : [originCoord, destinationCoord];
-    setTimeout(() => {
-      try {
-        mapRef.current?.fitToCoordinates?.(coords, {
-          edgePadding: {
-            top: Math.round(insets.top + 90),
-            right: 40,
-            bottom: Math.round(insets.bottom + 240),
-            left: 40,
-          },
-          animated: true,
-        });
-        fitModeRef.current = nextMode;
-      } catch {
-        // ignore
-      }
-    }, 60);
-  }, [isMapReady, driverCoord, originCoord, destinationCoord, insets.bottom, insets.top]);
+    if (mapFocusCoords.length >= 2) {
+      const nextMode = hasRouteGeometry ? 'fullRoute' : 'fullRouteMarkers';
+      if (!force && fitModeRef.current === nextMode) return true;
 
-  // Si no hay coords del servicio todavía, al menos centra en la ubicación del conductor.
-  useEffect(() => {
-    if (!isMapReady) return;
-    if (!mapRef.current) return;
-    if (!driverCoord) return;
-    if (originCoord) return; // cuando haya origen, el fit se encarga.
+      setTimeout(() => {
+        try {
+          programmaticCameraRef.current = true;
+          mapRef.current?.fitToCoordinates?.(mapFocusCoords, {
+            edgePadding: mapFitEdgePadding,
+            animated,
+          });
+          fitModeRef.current = nextMode;
+          setShowRecenterMapBtn(false);
+        } catch {
+          // ignore
+        } finally {
+          setTimeout(() => {
+            programmaticCameraRef.current = false;
+          }, 450);
+        }
+      }, 60);
 
-    // Evitar re-centrar infinito
-    if (fitModeRef.current === 'driverOnly') return;
-    fitModeRef.current = 'driverOnly';
+      return true;
+    }
+
+    if (!driverCoord) return false;
+    if (!force && fitModeRef.current === 'driverOnly') return true;
 
     try {
+      programmaticCameraRef.current = true;
       mapRef.current?.animateToRegion?.({
         latitude: driverCoord.latitude,
         longitude: driverCoord.longitude,
         latitudeDelta: 0.03,
         longitudeDelta: 0.03,
       }, 600);
+      fitModeRef.current = 'driverOnly';
+      setShowRecenterMapBtn(false);
     } catch {
       // ignore
+    } finally {
+      setTimeout(() => {
+        programmaticCameraRef.current = false;
+      }, 450);
     }
-  }, [isMapReady, driverCoord, originCoord]);
+
+    return true;
+  }, [driverCoord, hasRouteGeometry, isMapReady, mapFitEdgePadding, mapFocusCoords]);
+
+  useEffect(() => {
+    fitTripToRouteView({ animated: true, force: false });
+  }, [fitTripToRouteView]);
+
+  const handleRegionChangeComplete = useCallback((_region, details) => {
+    if (programmaticCameraRef.current) {
+      userMapGestureRef.current = false;
+      return;
+    }
+
+    const wasGesture = userMapGestureRef.current || details?.isGesture === true;
+    userMapGestureRef.current = false;
+
+    if (wasGesture) {
+      setShowRecenterMapBtn(true);
+    }
+  }, []);
 
   const badgeText = locationError
     ? locationError
@@ -1508,6 +1532,10 @@ export default function ActiveTripScreen({ route }) {
         ref={mapRef}
         style={styles.map}
         onMapReady={() => setIsMapReady(true)}
+        onPanDrag={() => {
+          userMapGestureRef.current = true;
+        }}
+        onRegionChangeComplete={handleRegionChangeComplete}
         showsUserLocation={false}
         showsMyLocationButton={false}
         initialRegion={
@@ -1620,6 +1648,20 @@ export default function ActiveTripScreen({ route }) {
             </View>
           ) : null}
         </View>
+
+        {showRecenterMapBtn ? (
+          <View style={[styles.recenterMapWrap, { top: Math.round(insets.top + 96) }]}>
+            <Pressable
+              onPress={() => {
+                fitTripToRouteView({ animated: true, force: true });
+              }}
+              style={styles.recenterMapBtn}
+            >
+              <MaterialCommunityIcons name="crosshairs-gps" size={17} color="#0A4F80" />
+              <Text style={styles.recenterMapBtnText}>Centrar</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         <View style={[styles.bottomCardWrap, { paddingBottom: insets.bottom + 14 }]} pointerEvents="box-none">
           <View style={styles.bottomCard}>
@@ -2000,6 +2042,33 @@ const styles = StyleSheet.create({
     color: '#0A4F80',
     fontSize: 12,
     fontWeight: '800',
+  },
+
+  recenterMapWrap: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 30,
+  },
+  recenterMapBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: '#8BC8F8',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  recenterMapBtnText: {
+    color: '#0A4F80',
+    fontSize: 12,
+    fontWeight: '900',
   },
 
   bottomCardWrap: {

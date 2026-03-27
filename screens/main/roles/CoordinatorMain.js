@@ -8,7 +8,7 @@ function hasPerm(perms = [], needle) {
   return perms.some((p) => String(p.permission_name || '').toLowerCase() === n);
 }
 
-function QuickAction({ icon, label, color = '#6C63FF', onPress }) {
+function QuickAction({ icon, label, color = '#4D6A92', onPress }) {
   return (
     <Pressable
       onPress={onPress}
