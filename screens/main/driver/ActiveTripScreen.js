@@ -278,8 +278,11 @@ export default function ActiveTripScreen({ route }) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef(null);
   const fitModeRef = useRef(null); // 'fullRoute' | 'fullRouteMarkers' | 'driverOnly'
+  const bothRoutesAutoFocusedRef = useRef(false);
   const userMapGestureRef = useRef(false);
   const programmaticCameraRef = useRef(false);
+  const locationPermissionStatusRef = useRef(null);
+  const lastEventLocationRef = useRef({ at: 0, value: null });
   const locationSubRef = useRef(null);
   const lastDriverCoordRef = useRef(null);
   const lastDriverRouteFetchAtRef = useRef(0);
@@ -571,9 +574,78 @@ export default function ActiveTripScreen({ route }) {
   const [isSyncingOfflineEvents, setIsSyncingOfflineEvents] = useState(false);
   const [showRecenterMapBtn, setShowRecenterMapBtn] = useState(false);
   const offlineSyncInFlightRef = useRef(false);
+  const actionSubmitInFlightRef = useRef(false);
+  const lastSentServiceEventRef = useRef({ key: '', at: 0 });
   const routeToPickupRef = useRef([]);
 
   const actionBusy = pauseActionLoading || statusActionLoading;
+
+  const getCurrentLocation = useCallback(async () => {
+    try {
+      let status = locationPermissionStatusRef.current;
+      if (!status || status === 'undetermined') {
+        const existing = await Location.getForegroundPermissionsAsync();
+        status = existing?.status;
+        if (status !== 'granted') {
+          const req = await Location.requestForegroundPermissionsAsync();
+          status = req?.status;
+        }
+        locationPermissionStatusRef.current = status;
+      }
+
+      if (status !== 'granted') return null;
+
+      const now = Date.now();
+      const cached = lastEventLocationRef.current;
+      if (cached?.value && now - (cached?.at || 0) < 8000) {
+        return cached.value;
+      }
+
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+
+      const latitude = Number(location?.coords?.latitude);
+      const longitude = Number(location?.coords?.longitude);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+
+      const value = { latitude, longitude };
+      lastEventLocationRef.current = { at: now, value };
+      return value;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const createClientEventId = useCallback(({
+    sid,
+    status,
+    substatus,
+    pauseReasonId,
+    createdAt,
+  }) => {
+    const rnd = Math.random().toString(36).slice(2, 8);
+    return [
+      'evt',
+      String(sid || '0'),
+      String(status || ''),
+      String(substatus || ''),
+      String(pauseReasonId ?? ''),
+      String(createdAt || new Date().toISOString()),
+      rnd,
+    ].join('-');
+  }, []);
+
+  const isLikelyDuplicateServiceEvent = useCallback((eventKey, windowMs = 2500) => {
+    if (!eventKey) return false;
+    const now = Date.now();
+    const last = lastSentServiceEventRef.current;
+    const isDuplicate = last?.key === eventKey && now - (last?.at || 0) <= windowMs;
+    if (!isDuplicate) {
+      lastSentServiceEventRef.current = { key: eventKey, at: now };
+    }
+    return isDuplicate;
+  }, []);
 
   useEffect(() => {
     routeToPickupRef.current = Array.isArray(routeToPickup) ? routeToPickup : [];
@@ -678,6 +750,7 @@ export default function ActiveTripScreen({ route }) {
       lastDriverRouteFetchAtRef.current = 0;
       lastDriverRouteFromRef.current = null;
       fitModeRef.current = null;
+      bothRoutesAutoFocusedRef.current = false;
       setShowRecenterMapBtn(false);
     }
     prevServiceIdRef.current = serviceId;
@@ -819,66 +892,90 @@ export default function ActiveTripScreen({ route }) {
     const sid = serviceId;
     if (!sid) return;
     if (actionBusy) return;
+    if (actionSubmitInFlightRef.current) return;
 
     setPauseActionError('');
     const next = String(nextSubstatus || '').toUpperCase();
     const pauseReasonId = next === 'PAUSED' ? reasonId : null;
+    const dedupeKey = `svc:${Number(sid)}:sub:${next}:${pauseReasonId ?? ''}`;
+    if (isLikelyDuplicateServiceEvent(dedupeKey)) return;
 
-    if (!isOnline) {
-      await enqueueOfflineEvent({
-        service_id: Number(sid),
+    actionSubmitInFlightRef.current = true;
+    try {
+      const createdAt = new Date().toISOString();
+      const eventId = createClientEventId({
+        sid: Number(sid),
         status: null,
         substatus: next,
-        pause_reason_id: pauseReasonId,
-        created_at: new Date().toISOString(),
+        pauseReasonId,
+        createdAt,
       });
+      const location = await getCurrentLocation();
 
-      setService((prev) => ({
-        ...prev,
-        substatus_name: next,
-        pause_reason_id: pauseReasonId,
-      }));
-      setPauseModalVisible(false);
-      refreshOfflineQueueCount();
-      return;
-    }
+      if (!isOnline) {
+        await enqueueOfflineEvent({
+          event_id: eventId,
+          service_id: Number(sid),
+          status: null,
+          substatus: next,
+          pause_reason_id: pauseReasonId,
+          latitude: location?.latitude ?? null,
+          longitude: location?.longitude ?? null,
+          created_at: createdAt,
+        });
 
-    setPauseActionLoading(true);
-    try {
-      const body = {
-        service_id: Number(sid),
-        substatus: next,
-      };
-
-      if (next === 'PAUSED') {
-        body.pause_reason_id = reasonId;
+        setService((prev) => ({
+          ...prev,
+          substatus_name: next,
+          pause_reason_id: pauseReasonId,
+        }));
+        setPauseModalVisible(false);
+        refreshOfflineQueueCount();
+        return;
       }
-      if (next === 'ACTIVED') {
-        body.pause_reason_id = null;
+
+      setPauseActionLoading(true);
+      try {
+        const body = {
+          event_id: eventId,
+          service_id: Number(sid),
+          substatus: next,
+        };
+
+        if (next === 'PAUSED') {
+          body.pause_reason_id = reasonId;
+        }
+        if (next === 'ACTIVED') {
+          body.pause_reason_id = null;
+        }
+
+        await callEdgeFunction('driver-service-response', {
+          method: 'POST',
+          body: {
+            ...body,
+            created_at: createdAt,
+            latitude: location?.latitude ?? null,
+            longitude: location?.longitude ?? null,
+          },
+          timeout: 20000,
+        });
+
+        // Optimista: actualizar UI inmediatamente tras éxito.
+        setService((prev) => ({
+          ...prev,
+          substatus_name: next,
+          pause_reason_id: next === 'PAUSED' ? reasonId : null,
+        }));
+
+        await refetchService();
+      } catch (e) {
+        setPauseActionError(e?.message || 'No se pudo actualizar la pausa');
+        throw e;
+      } finally {
+        setPauseActionLoading(false);
       }
-
-      await callEdgeFunction('driver-service-response', {
-        method: 'POST',
-        body: {
-          ...body,
-          created_at: new Date().toISOString(),
-        },
-        timeout: 20000,
-      });
-
-      // Optimista: actualizar UI inmediatamente tras éxito.
-      setService((prev) => ({
-        ...prev,
-        substatus_name: next,
-        pause_reason_id: next === 'PAUSED' ? reasonId : null,
-      }));
-
-      await refetchService();
-    } catch (e) {
-      setPauseActionError(e?.message || 'No se pudo actualizar la pausa');
-      throw e;
     } finally {
-      setPauseActionLoading(false);
+      actionSubmitInFlightRef.current = false;
     }
   };
 
@@ -886,78 +983,106 @@ export default function ActiveTripScreen({ route }) {
     const sid = serviceId;
     if (!sid) return;
     if (actionBusy) return;
+    if (actionSubmitInFlightRef.current) return;
 
     const next = String(nextStatus || '').toUpperCase();
+    const shouldAttachLocation = next === 'LOADED' || next === 'DELIVERED';
 
-    if (!isOnline && next === 'ACCEPTED') {
-      setStatusActionError('Debes tener conexión para aceptar el servicio');
-      return;
+    if (shouldAttachLocation) {
+      const dedupeKey = `svc:${Number(sid)}:status:${next}`;
+      if (isLikelyDuplicateServiceEvent(dedupeKey)) return;
     }
 
-    if (!isOnline && (next === 'LOADED' || next === 'DELIVERED')) {
-      await enqueueOfflineEvent({
-        service_id: Number(sid),
+    actionSubmitInFlightRef.current = true;
+    try {
+      const createdAt = new Date().toISOString();
+      const eventId = createClientEventId({
+        sid: Number(sid),
         status: next,
         substatus: null,
-        pause_reason_id: null,
-        created_at: new Date().toISOString(),
+        pauseReasonId: null,
+        createdAt,
       });
+      const location = shouldAttachLocation ? await getCurrentLocation() : null;
 
-      setService((prev) => ({
-        ...prev,
-        status_name: next,
-        status_id: next === 'LOADED' ? 3 : 4,
-      }));
+      if (!isOnline && next === 'ACCEPTED') {
+        setStatusActionError('Debes tener conexión para aceptar el servicio');
+        return;
+      }
 
-      setStatusActionError('');
-      refreshOfflineQueueCount();
-      return;
-    }
-
-    setStatusActionError('');
-    setStatusActionLoading(true);
-    const isDriverCancel = next === 'CANCELED';
-    if (isDriverCancel) {
-      markDriverCanceled(sid);
-    }
-    try {
-      await callEdgeFunction('driver-service-response', {
-        method: 'POST',
-        body: {
+      if (!isOnline && (next === 'LOADED' || next === 'DELIVERED')) {
+        await enqueueOfflineEvent({
+          event_id: eventId,
           service_id: Number(sid),
           status: next,
-          created_at: new Date().toISOString(),
-        },
-        timeout: 20000,
-      });
+          substatus: null,
+          pause_reason_id: null,
+          latitude: location?.latitude ?? null,
+          longitude: location?.longitude ?? null,
+          created_at: createdAt,
+        });
 
-      // Optimista: actualizar UI inmediatamente tras éxito.
-      setService((prev) => ({
-        ...prev,
-        status_name: next,
-        status_id:
-          next === 'CREATED'
-            ? 1
-            : next === 'ACCEPTED'
-              ? 2
-              : next === 'LOADED'
-                ? 3
-                : next === 'DELIVERED'
-                  ? 4
-                  : next === 'CANCELED'
-                    ? 5
-                    : prev?.status_id,
-      }));
+        setService((prev) => ({
+          ...prev,
+          status_name: next,
+          status_id: next === 'LOADED' ? 3 : 4,
+        }));
 
-      await refetchService();
-    } catch (e) {
-      if (isDriverCancel) {
-        unmarkDriverCanceled(sid);
+        setStatusActionError('');
+        refreshOfflineQueueCount();
+        return;
       }
-      setStatusActionError(e?.message || 'No se pudo actualizar el estado');
-      throw e;
+
+      setStatusActionError('');
+      setStatusActionLoading(true);
+      const isDriverCancel = next === 'CANCELED';
+      if (isDriverCancel) {
+        markDriverCanceled(sid);
+      }
+      try {
+        await callEdgeFunction('driver-service-response', {
+          method: 'POST',
+          body: {
+            event_id: eventId,
+            service_id: Number(sid),
+            status: next,
+            created_at: createdAt,
+            latitude: shouldAttachLocation ? (location?.latitude ?? null) : undefined,
+            longitude: shouldAttachLocation ? (location?.longitude ?? null) : undefined,
+          },
+          timeout: 20000,
+        });
+
+        // Optimista: actualizar UI inmediatamente tras éxito.
+        setService((prev) => ({
+          ...prev,
+          status_name: next,
+          status_id:
+            next === 'CREATED'
+              ? 1
+              : next === 'ACCEPTED'
+                ? 2
+                : next === 'LOADED'
+                  ? 3
+                  : next === 'DELIVERED'
+                    ? 4
+                    : next === 'CANCELED'
+                      ? 5
+                      : prev?.status_id,
+        }));
+
+        await refetchService();
+      } catch (e) {
+        if (isDriverCancel) {
+          unmarkDriverCanceled(sid);
+        }
+        setStatusActionError(e?.message || 'No se pudo actualizar el estado');
+        throw e;
+      } finally {
+        setStatusActionLoading(false);
+      }
     } finally {
-      setStatusActionLoading(false);
+      actionSubmitInFlightRef.current = false;
     }
   };
 
@@ -1022,10 +1147,13 @@ export default function ActiveTripScreen({ route }) {
             await callEdgeFunction('driver-service-response', {
               method: 'POST',
               body: {
+                event_id: ev?.event_id || undefined,
                 service_id: Number(ev?.service_id),
                 status: ev?.status || undefined,
                 substatus: ev?.substatus || undefined,
                 pause_reason_id: ev?.pause_reason_id ?? undefined,
+                latitude: ev?.latitude ?? null,
+                longitude: ev?.longitude ?? null,
                 created_at: ev?.created_at || new Date().toISOString(),
               },
               timeout: 20000,
@@ -1419,6 +1547,10 @@ export default function ActiveTripScreen({ route }) {
     return (effectiveRouteToPickup?.length || 0) >= 2 || (effectiveRouteToDestination?.length || 0) >= 2;
   }, [effectiveRouteToDestination, effectiveRouteToPickup]);
 
+  const bothRoutesReady = useMemo(() => {
+    return (effectiveRouteToPickup?.length || 0) >= 2 && (effectiveRouteToDestination?.length || 0) >= 2;
+  }, [effectiveRouteToDestination, effectiveRouteToPickup]);
+
   const mapFocusCoords = useMemo(() => {
     const byKey = new Map();
 
@@ -1503,6 +1635,17 @@ export default function ActiveTripScreen({ route }) {
   useEffect(() => {
     fitTripToRouteView({ animated: true, force: false });
   }, [fitTripToRouteView]);
+
+  // Cuando ambas líneas ya están pintadas, forzar una sola vez el enfoque completo.
+  // Evita que el mapa quede "atrapado" en un fit previo de A→B.
+  useEffect(() => {
+    if (!isMapReady) return;
+    if (!bothRoutesReady) return;
+    if (bothRoutesAutoFocusedRef.current) return;
+
+    bothRoutesAutoFocusedRef.current = true;
+    fitTripToRouteView({ animated: true, force: true });
+  }, [bothRoutesReady, fitTripToRouteView, isMapReady]);
 
   const handleRegionChangeComplete = useCallback((_region, details) => {
     if (programmaticCameraRef.current) {

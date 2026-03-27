@@ -65,6 +65,33 @@ function createdAtToMs(value) {
   return 0;
 }
 
+function isSemanticallySameEvent(a, b, windowMs = 2500) {
+  if (!a || !b) return false;
+  if (String(a?.service_id) !== String(b?.service_id)) return false;
+  if (String(a?.status || '') !== String(b?.status || '')) return false;
+  if (String(a?.substatus || '') !== String(b?.substatus || '')) return false;
+  if ((a?.pause_reason_id ?? null) !== (b?.pause_reason_id ?? null)) return false;
+
+  const ta = createdAtToMs(a?.created_at);
+  const tb = createdAtToMs(b?.created_at);
+  if (!ta || !tb) return false;
+  return Math.abs(ta - tb) <= windowMs;
+}
+
+function normalizeLatitude(value) {
+  if (value == null || value === '') return null;
+  const lat = Number(value);
+  if (!Number.isFinite(lat) || Math.abs(lat) > 90) return null;
+  return lat;
+}
+
+function normalizeLongitude(value) {
+  if (value == null || value === '') return null;
+  const lng = Number(value);
+  if (!Number.isFinite(lng) || Math.abs(lng) > 180) return null;
+  return lng;
+}
+
 export async function getPersistedActiveTrip() {
   const raw = await AsyncStorage.getItem(ACTIVE_TRIP_KEY);
   const parsed = safeParse(raw, null);
@@ -119,12 +146,17 @@ export async function enqueueOfflineEvent(event) {
     status: event?.status ? String(event.status).toUpperCase() : null,
     substatus: event?.substatus ? String(event.substatus).toUpperCase() : null,
     pause_reason_id: event?.pause_reason_id ?? null,
+    latitude: normalizeLatitude(event?.latitude),
+    longitude: normalizeLongitude(event?.longitude),
     created_at: createdAt,
   };
 
   const queue = await getOfflineEventsQueue();
   const exists = queue.some((q) => String(q?.event_id) === normalized.event_id);
   if (exists) return normalized;
+
+  const semanticDuplicate = queue.find((q) => isSemanticallySameEvent(q, normalized));
+  if (semanticDuplicate) return semanticDuplicate;
 
   queue.push(normalized);
   queue.sort((a, b) => createdAtToMs(a?.created_at) - createdAtToMs(b?.created_at));

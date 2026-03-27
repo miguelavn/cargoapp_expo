@@ -525,10 +525,13 @@ export function useDriverDashboard(enabled) {
 					await callEdgeFunction('driver-service-response', {
 						method: 'POST',
 						body: {
+							event_id: ev?.event_id || undefined,
 							service_id: Number(ev?.service_id),
 							status: ev?.status || undefined,
 							substatus: ev?.substatus || undefined,
 							pause_reason_id: ev?.pause_reason_id ?? undefined,
+							latitude: ev?.latitude ?? null,
+							longitude: ev?.longitude ?? null,
 							created_at: ev?.created_at || new Date().toISOString(),
 						},
 						timeout: 20000,
