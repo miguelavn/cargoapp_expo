@@ -39,18 +39,18 @@ export default function ForgotPasswordScreen({ navigation }) {
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#6C63FF" }}>
+    <View style={{ flex: 1, backgroundColor: "#A2C6E9" }}>
       {/* Botón moderno de regresar */}
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <MaterialIcons name="arrow-back" size={22} color="#000" />
+          <MaterialIcons name="arrow-back" size={22} color="#ffffff" />
         </TouchableOpacity>
       </View>
 
       {/* Encabezado con ilustración */}
       <View style={styles.header}>
         <Image
-          source={require("../../../assets/resetPassword.png")}
+          source={require("../../../assets/resetPasswordimagen.png")}
           style={styles.headerImage}
           resizeMode="contain"
         />
@@ -76,6 +76,7 @@ export default function ForgotPasswordScreen({ navigation }) {
                 error ? styles.inputError : isValidEmail ? styles.inputSuccess : null,
               ]}
               placeholder="Correo electrónico"
+              placeholderTextColor="#888"
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
@@ -109,7 +110,7 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
   backButton: {
-    backgroundColor: "#FFD23F",
+    backgroundColor: "#4D6A92",
     padding: 10,
     borderTopLeftRadius: 8,
     borderBottomLeftRadius: 20,
@@ -122,7 +123,7 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   header: {
-    backgroundColor: "#6C63FF",
+    backgroundColor: "#A2C6E9",
     height: 200,
     alignItems: "center",
     justifyContent: "center",
@@ -196,7 +197,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   button: {
-    backgroundColor: "#FFD23F",
+    backgroundColor: "#4D6A92",
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
@@ -206,7 +207,7 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   buttonText: {
-    color: "#333",
+    color: "#fff",
     fontSize: 17,
     fontWeight: "600",
   },

@@ -86,18 +86,18 @@ export default function VerifyCodeScreen({ route, navigation }) {
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#6C63FF" }}>
+    <View style={{ flex: 1, backgroundColor: "#A2C6E9" }}>
       {/* Botón moderno de regresar */}
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <MaterialIcons name="arrow-back" size={22} color="#000" />
+          <MaterialIcons name="arrow-back" size={22} color="#ffffff" />
         </TouchableOpacity>
       </View>
 
       {/* Encabezado con ilustración */}
       <View style={styles.header}>
         <Image
-          source={require("../../../assets/resetPassword.png")}
+          source={require("../../../assets/resetPasswordimagen.png")}
           style={styles.headerImage}
           resizeMode="contain"
         />
@@ -117,6 +117,7 @@ export default function VerifyCodeScreen({ route, navigation }) {
             <TextInput
               style={[styles.input, !code ? null : isValidCode ? styles.inputSuccess : styles.inputError]}
               placeholder="Código de 6 dígitos"
+              placeholderTextColor={"#888"}
               value={code}
               onChangeText={setCode}
               keyboardType="numeric"
@@ -131,6 +132,7 @@ export default function VerifyCodeScreen({ route, navigation }) {
             <TextInput
               style={[styles.input, !newPassword ? null : isValidPassword ? styles.inputSuccess : styles.inputError]}
               placeholder="Nueva contraseña"
+              placeholderTextColor={"#888"}
               secureTextEntry={!showPassword}
               value={newPassword}
               onChangeText={setNewPassword}
@@ -151,6 +153,7 @@ export default function VerifyCodeScreen({ route, navigation }) {
                 !confirmPassword ? null : passwordsMatch ? styles.inputSuccess : styles.inputError,
               ]}
               placeholder="Confirmar contraseña"
+              placeholderTextColor={"#888"}
               secureTextEntry={!showConfirmPassword}
               value={confirmPassword}
               onChangeText={setConfirmPassword}
@@ -191,7 +194,7 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
   backButton: {
-    backgroundColor: "#FFD23F",
+    backgroundColor: "#4D6A92",
     padding: 10,
     borderTopLeftRadius: 8,
     borderBottomLeftRadius: 20,
@@ -204,7 +207,7 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   header: {
-    backgroundColor: "#6C63FF",
+    backgroundColor: "#A2C6E9",
     height: 200,
     alignItems: "center",
     justifyContent: "center",
@@ -254,6 +257,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     backgroundColor: "#F3F4F6",
     paddingRight: 40,
+    color: "#333",
   },
   inputSuccess: {
     borderColor: "#2ecc40",
@@ -292,7 +296,7 @@ const styles = StyleSheet.create({
     textAlign: 'left',
   },
   button: {
-    backgroundColor: "#FFD23F",
+    backgroundColor: "#4D6A92",
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
@@ -302,7 +306,7 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   buttonText: {
-    color: "#333",
+    color: "#fff",
     fontSize: 17,
     fontWeight: "600",
   },
@@ -314,6 +318,6 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   resendText: { color: '#666' },
-  resendLink: { color: '#007bff', fontWeight: '600' },
+  resendLink: { color: '#4D6A92', fontWeight: '600' },
   resendLinkDisabled: { color: '#999' },
 });

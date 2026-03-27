@@ -5,11 +5,11 @@ import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view
 
 export default function PasswordResetSuccessScreen({ navigation }) {
   return (
-    <View style={{ flex: 1, backgroundColor: "#6C63FF" }}>
+    <View style={{ flex: 1, backgroundColor: "#A2C6E9" }}>
       {/* Encabezado con ilustración */}
       <View style={styles.header}>
         <Image
-          source={require("../../../assets/resetPassword.png")}
+          source={require("../../../assets/resetPasswordimagen.png")}
           style={styles.headerImage}
           resizeMode="contain"
         />
@@ -35,7 +35,7 @@ export default function PasswordResetSuccessScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   header: {
-    backgroundColor: "#6C63FF",
+    backgroundColor: "#A2C6E9",
     height: 200,
     alignItems: "center",
     justifyContent: "center",
@@ -68,6 +68,6 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 22, fontWeight: "bold", marginBottom: 10, color: '#333' },
   text: { fontSize: 16, textAlign: "center", marginBottom: 20, color: '#666' },
-  button: { backgroundColor: "#FFD23F", paddingVertical: 14, borderRadius: 10, width: "100%", alignItems: "center" },
-  buttonText: { color: "#333", fontWeight: "600", fontSize: 17 },
+  button: { backgroundColor: "#4D6A92", paddingVertical: 14, borderRadius: 10, width: "100%", alignItems: "center" },
+  buttonText: { color: "#fff", fontWeight: "600", fontSize: 17 },
 });
