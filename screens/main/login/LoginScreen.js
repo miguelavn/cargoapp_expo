@@ -72,11 +72,11 @@ const LoginScreen = ({ navigation }) => {
   };
 
   return (
-  <View style={{ flex: 1, backgroundColor: "#6C63FF" }}>
+  <View style={{ flex: 1, backgroundColor: "#A2C6E9" }}>
     {/* Encabezado con ilustración */}
     <View style={styles.header}>
       <Image
-        source={require("../../../assets/login.png")}
+        source={require("../../../assets/loginimagen.png")}
         style={styles.headerImage}
         resizeMode="contain"
       />
@@ -104,6 +104,7 @@ const LoginScreen = ({ navigation }) => {
                 : null,
             ]}
             placeholder="Email"
+            placeholderTextColor="#888"
             value={form.email}
             onChangeText={(v) => handleChange("email", v)}
             keyboardType="email-address"
@@ -134,6 +135,7 @@ const LoginScreen = ({ navigation }) => {
                 : null,
             ]}
             placeholder="Contraseña"
+            placeholderTextColor="#888"
             value={form.password}
             onChangeText={(v) => handleChange("password", v)}
             secureTextEntry={!showPassword}
@@ -240,7 +242,7 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   header: {
-    backgroundColor: "#6C63FF",
+    backgroundColor: "#A2C6E9",
     height: 200,
     alignItems: "center",
     justifyContent: "center",
@@ -314,7 +316,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   button: {
-    backgroundColor: "#FFD23F",
+    backgroundColor: "#4D6A92",
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
@@ -324,7 +326,7 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   buttonText: {
-    color: "#333",
+    color: "#fff",
     fontSize: 19,
     fontWeight: "600",
   },
