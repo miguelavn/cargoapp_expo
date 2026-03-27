@@ -61,7 +61,7 @@ function TabNavigator() {
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarShowLabel: true,
-        tabBarActiveTintColor: '#6C63FF',
+        tabBarActiveTintColor: '#4D6A92',
         tabBarInactiveTintColor: '#666',
         tabBarLabelStyle: { fontSize: 11, marginTop: -2 },
         tabBarStyle: {

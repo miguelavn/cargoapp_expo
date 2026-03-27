@@ -107,7 +107,7 @@ const MainScreen = ({ navigation }) => {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#6C63FF' }}>
+    <View style={{ flex: 1, backgroundColor: '#A2C6E9' }}>
       {/* Contenedor principal blanco redondeado */}
       <View style={styles.container}>
         <View style={styles.content}>
@@ -250,7 +250,7 @@ const styles = StyleSheet.create({
   unsupportedRoleText: { fontSize: 13, color: '#4B5563', marginBottom: 10 },
   unsupportedRoleButton: {
     alignSelf: 'flex-start',
-    backgroundColor: '#6C63FF',
+    backgroundColor: '#4D6A92',
     paddingVertical: 10,
     paddingHorizontal: 14,
     borderRadius: 10,

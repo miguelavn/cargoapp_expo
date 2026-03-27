@@ -17,8 +17,8 @@ import NetInfo from '@react-native-community/netinfo';
 import { MaterialIcons } from '@expo/vector-icons';
 
 const COLORS = {
-  purple: '#6C63FF',
-  yellow: '#FFD23F',
+  primary: '#4D6A92',
+  secondary: '#A2C6E9',
   white: '#FFFFFF',
   grayText: '#666',
   dark: '#222',
@@ -149,7 +149,7 @@ export default function AccountScreen({ navigation }) {
   const InfoRow = ({ icon, label, value, color }) => (
     <View style={styles.infoRow}>
       <View style={styles.infoIconWrap}>
-        <MaterialIcons name={icon} size={20} color={COLORS.purple} />
+        <MaterialIcons name={icon} size={20} color={COLORS.primary} />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={styles.infoLabel}>{label}</Text>
@@ -168,15 +168,15 @@ export default function AccountScreen({ navigation }) {
             <Text style={styles.offlineText}>Sin conexión - mostrando datos guardados</Text>
           </View>
         )}
-        {/* Header morado */}
+        {/* Header */}
   <View style={[styles.headerArea, { paddingTop: headerTop }]}>
           <View style={styles.topBar}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-              <MaterialIcons name="arrow-back" size={22} color={COLORS.dark} />
+              <MaterialIcons name="arrow-back" size={22} color={COLORS.white} />
             </TouchableOpacity>
             <Text style={styles.title}>Cuenta</Text>
             <TouchableOpacity onPress={fetchProfile} style={styles.refreshBtn}>
-              <MaterialIcons name="refresh" size={22} color={COLORS.dark} />
+              <MaterialIcons name="refresh" size={22} color={COLORS.white} />
             </TouchableOpacity>
           </View>
           <View style={styles.avatarWrapper}>
@@ -192,7 +192,7 @@ export default function AccountScreen({ navigation }) {
          <View style={styles.contentArea}>
           {loading && (
             <View style={{ paddingVertical: 40 }}>
-              <ActivityIndicator size="large" color={COLORS.purple} />
+              <ActivityIndicator size="large" color={COLORS.primary} />
             </View>
           )}
           {!loading && error && (
@@ -247,7 +247,7 @@ const styles = StyleSheet.create({
    },
   root: { flex: 1 },
   headerArea: {
-    backgroundColor: COLORS.purple,
+    backgroundColor: COLORS.secondary,
     paddingHorizontal: 20,
   paddingTop: 0,
   paddingBottom: 10, 
@@ -259,7 +259,7 @@ const styles = StyleSheet.create({
   marginBottom: 6, 
   },
   backButton: {
-    backgroundColor: COLORS.yellow,
+    backgroundColor: COLORS.primary,
     padding: 10,
     borderRadius: 20,
     elevation: 3,
@@ -269,7 +269,7 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
   },
   refreshBtn: {
-    backgroundColor: COLORS.yellow,
+    backgroundColor: COLORS.primary,
     padding: 10,
     borderRadius: 20,
     elevation: 3,
@@ -292,7 +292,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.3)',
   },
   userName: { fontSize: 20, fontWeight: '700', color: COLORS.white, maxWidth: '80%' },
-  userEmail: { fontSize: 13, fontWeight: '500', color: 'rgba(255,255,255,0.85)', marginTop: 2 },
+  userEmail: { fontSize: 13, fontWeight: '500', color: COLORS.white, marginTop: 2 },
   contentArea: {
     flex: 1,
     backgroundColor: COLORS.white,
@@ -340,7 +340,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: COLORS.yellow,
+    backgroundColor: COLORS.secondary,
     paddingVertical: 16,
     borderRadius: 14,
     marginBottom: 14,

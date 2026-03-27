@@ -1,9 +1,9 @@
 export const COLORS = {
   // Paridad con modo web (brand azul)
-  primary: '#3d94ff',
-  secondary: '#FFD23F',
+  primary: '#4D6A92',
+  secondary: '#A2C6E9',
   // Aliases usados en pantallas legacy
-  purple: '#3d94ff',
+  purple: '#4D6A92',
   yellow: '#FFD23F',
   white: '#FFFFFF',
   background: '#FAFAFA',
