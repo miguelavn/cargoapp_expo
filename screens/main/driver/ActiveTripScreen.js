@@ -13,6 +13,7 @@ import { supabase } from '../../../supabaseClient';
 import { callEdgeFunction } from '../../../api/edgeFunctions';
 import { sendLocalNotification } from '../../../services/notifications';
 import { consumeDriverCanceled, markDriverCanceled, unmarkDriverCanceled } from '../../../services/driverCancelTracker';
+import { useRouteTracking } from '../../../hooks/useRouteTracking';
 import {
   clearPersistedActiveTrip,
   enqueueOfflineEvent,
@@ -726,6 +727,11 @@ export default function ActiveTripScreen({ route }) {
   const canLoad = !isTerminal && !isPaused && statusUpper === 'ACCEPTED';
   const canDeliver = !isTerminal && !isPaused && statusUpper === 'LOADED';
   const showCompactActionRow = canPause && (canLoad || canDeliver);
+
+  useRouteTracking({
+    serviceId: serviceId ? Number(serviceId) : null,
+    isActive: !!serviceId && !isTerminal,
+  });
 
   const hasCachedPickupForCurrentService = useMemo(() => {
     if (!Array.isArray(cachedRouteToPickup) || cachedRouteToPickup.length < 2) return false;
