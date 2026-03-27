@@ -286,6 +286,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     backgroundColor: "#F3F4F6",
     paddingRight: 40,
+    color: "#333",
   },
   inputSuccess: {
     borderColor: "#2ecc40",
