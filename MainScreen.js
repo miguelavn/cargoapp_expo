@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Alert, Pressable } from 'react-native';
 import { supabase } from './supabaseClient';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -18,6 +18,31 @@ const MainScreen = ({ navigation }) => {
   const noRoleHandled = useRef(false);
   const { setPermissions: setGlobalPermissions } = usePermissions();
 
+  const resetToLogin = useCallback(() => {
+    let nav = navigation;
+    while (nav) {
+      const names = nav?.getState?.()?.routeNames;
+      if (Array.isArray(names) && names.includes('Login')) {
+        nav.reset({ index: 0, routes: [{ name: 'Login' }] });
+        return;
+      }
+      nav = nav?.getParent?.();
+    }
+    navigation.navigate('Login');
+  }, [navigation]);
+
+  const signOutSafely = useCallback(async () => {
+    const { error: signOutError } = await supabase.auth.signOut();
+    if (!signOutError) return;
+    const msg = String(signOutError?.message || signOutError || '').toLowerCase();
+    const isNoSession =
+      msg.includes('no hay sesión activa') ||
+      msg.includes('auth session missing') ||
+      msg.includes('session not found') ||
+      msg.includes('sesión');
+    if (!isNoSession) throw signOutError;
+  }, []);
+
   const hasPermission = (perms, needle) => {
     const n = String(needle).toLowerCase();
     return (perms || []).some((p) => String(p?.permission_name || p).toLowerCase() === n);
@@ -35,7 +60,12 @@ const MainScreen = ({ navigation }) => {
       setError('');
       try {
         const { data: { user } } = await supabase.auth.getUser();
-        if (!user) throw new Error('No se encontró usuario logueado');
+        if (!user) {
+          setPermissions([]);
+          setGlobalPermissions([]);
+          resetToLogin();
+          return;
+        }
 
         // Consulta directa a la vista 
         const { data: row, error: viewError } = await supabase
@@ -71,9 +101,26 @@ const MainScreen = ({ navigation }) => {
         setPermissions(perms);
         setGlobalPermissions(perms);
       } catch (err) {
-        setError(err.message);
+        const msg = String(err?.message || err || '');
         setPermissions([]);
-        if (!noRoleHandled.current && /rol activo/i.test(err.message)) {
+        setGlobalPermissions([]);
+
+        const noSession =
+          msg.toLowerCase().includes('no se encontró usuario logueado') ||
+          msg.toLowerCase().includes('no hay sesión activa') ||
+          msg.toLowerCase().includes('auth session missing') ||
+          msg.toLowerCase().includes('session not found') ||
+          msg.toLowerCase().includes('sesión');
+
+        if (noSession) {
+          setError('');
+          resetToLogin();
+          return;
+        }
+
+        setError(msg);
+
+        if (!noRoleHandled.current && /rol activo/i.test(msg)) {
           noRoleHandled.current = true;
           Alert.alert(
             'Sin rol asignado',
@@ -82,8 +129,12 @@ const MainScreen = ({ navigation }) => {
               {
                 text: 'Aceptar',
                 onPress: async () => {
-                  try { await supabase.auth.signOut(); } catch (_) {}
-                  navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+                  try {
+                    await signOutSafely();
+                  } catch {
+                    // ignore
+                  }
+                  resetToLogin();
                 },
               },
             ],
@@ -94,7 +145,7 @@ const MainScreen = ({ navigation }) => {
       setLoading(false);
     };
     fetchFromView();
-  }, []);
+  }, [resetToLogin, setGlobalPermissions, signOutSafely]);
 
   const isDriverByPermission = hasPermission(
     permissions,
@@ -141,8 +192,12 @@ const MainScreen = ({ navigation }) => {
               </Text>
               <Pressable
                 onPress={async () => {
-                  try { await supabase.auth.signOut(); } catch (_) {}
-                  navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+                  try {
+                    await signOutSafely();
+                  } catch {
+                    // ignore
+                  }
+                  resetToLogin();
                 }}
                 style={styles.unsupportedRoleButton}
               >

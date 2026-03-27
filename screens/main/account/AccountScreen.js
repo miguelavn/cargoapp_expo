@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -39,6 +39,20 @@ export default function AccountScreen({ navigation }) {
   const [isOffline, setIsOffline] = useState(false);
   const [netReady, setNetReady] = useState(false); // sabemos ya el estado inicial de red
   const CACHE_KEY = 'account_profile_cache_v1';
+  const isLoggingOutRef = useRef(false);
+
+  const resetToLogin = useCallback(() => {
+    let nav = navigation;
+    while (nav) {
+      const names = nav?.getState?.()?.routeNames;
+      if (Array.isArray(names) && names.includes('Login')) {
+        nav.reset({ index: 0, routes: [{ name: 'Login' }] });
+        return;
+      }
+      nav = nav?.getParent?.();
+    }
+    navigation.navigate('Login');
+  }, [navigation]);
 
   // Cargar caché inicial y suscribirse a cambios de red
   useEffect(() => {
@@ -69,7 +83,12 @@ export default function AccountScreen({ navigation }) {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const user = session?.user;
-      if (!user) throw new Error('No hay sesión activa');
+      if (!user) {
+        if (!isLoggingOutRef.current) {
+          resetToLogin();
+        }
+        return;
+      }
 
       // Query con joins reales según el esquema:
       // app_users (user_id PK) -> users_roles (user_id FK) -> roles (id PK) y companies (company_id FK)
@@ -126,11 +145,25 @@ export default function AccountScreen({ navigation }) {
   // Guardar en caché
   try { await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(finalProfile)); } catch (_) { /* ignore */ }
     } catch (e) {
-      setError(e.message);
+      const msg = String(e?.message || e || 'Error al cargar perfil');
+      const isNoSession =
+        msg.toLowerCase().includes('no hay sesión activa') ||
+        msg.toLowerCase().includes('auth session missing') ||
+        msg.toLowerCase().includes('session not found') ||
+        msg.toLowerCase().includes('sesión');
+
+      if (isNoSession && !isLoggingOutRef.current) {
+        resetToLogin();
+        return;
+      }
+
+      if (!isLoggingOutRef.current) {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
-  }, [isOffline]);
+  }, [isOffline, resetToLogin]);
 
   // Ejecutar fetch cuando ya conocemos el estado de red inicial
   useEffect(() => {
@@ -138,8 +171,32 @@ export default function AccountScreen({ navigation }) {
   }, [netReady, fetchProfile]);
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
-    navigation.replace('Login');
+    isLoggingOutRef.current = true;
+    setError('');
+    setLoading(true);
+    try {
+      const { error: signOutError } = await supabase.auth.signOut();
+      if (signOutError) {
+        const msg = String(signOutError?.message || signOutError || '');
+        const isNoSession =
+          msg.toLowerCase().includes('no hay sesión activa') ||
+          msg.toLowerCase().includes('auth session missing') ||
+          msg.toLowerCase().includes('session not found') ||
+          msg.toLowerCase().includes('sesión');
+        if (!isNoSession) {
+          Alert.alert('Cerrar sesión', msg || 'No se pudo cerrar sesión');
+        }
+      }
+    } finally {
+      try {
+        await AsyncStorage.removeItem(CACHE_KEY);
+      } catch {
+        // ignore
+      }
+      resetToLogin();
+      isLoggingOutRef.current = false;
+      setLoading(false);
+    }
   };
 
   const fullName = profile?.display_name || [profile?.name, profile?.last_name].filter(Boolean).join(' ') || 'Usuario';
