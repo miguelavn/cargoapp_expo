@@ -5,6 +5,18 @@ export const OFFLINE_EVENTS_QUEUE_KEY = 'OFFLINE_EVENTS_QUEUE';
 
 let syncInFlight = false;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForSyncToFinish({ timeoutMs = 6000, stepMs = 120 } = {}) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  while (syncInFlight && Date.now() < deadline) {
+    await sleep(stepMs);
+  }
+  return !syncInFlight;
+}
+
 function isObject(v) {
   return v != null && typeof v === 'object' && !Array.isArray(v);
 }
@@ -130,7 +142,14 @@ export async function syncOfflineEventsQueue(sendEventFn) {
     return { processed: 0, remaining: await getOfflineEventsCount(), lastError: null };
   }
   if (syncInFlight) {
-    return { processed: 0, remaining: await getOfflineEventsCount(), lastError: null };
+    const idle = await waitForSyncToFinish();
+    return {
+      processed: 0,
+      remaining: await getOfflineEventsCount(),
+      lastError: null,
+      waitedForInFlight: true,
+      inFlightResolved: idle,
+    };
   }
 
   syncInFlight = true;
