@@ -34,6 +34,32 @@ function statusVariant(statusName) {
   return 'default';
 }
 
+function getSubstatusNameFromItem(item) {
+  const raw = String(item?.substatus_name || '').trim();
+  if (raw) return raw.toUpperCase();
+
+  const sid = Number(item?.substatus_id);
+  if (sid === 1) return 'ACTIVED';
+  if (sid === 2) return 'PAUSED';
+  return '';
+}
+
+function getPauseReasonLabel(item, pauseReasonById = {}) {
+  const byName = String(item?.pause_reason_name || '').trim();
+  if (byName) return byName;
+
+  const nestedName = String(item?.pause_reason?.name || item?.pause_reason?.reason_name || '').trim();
+  if (nestedName) return nestedName;
+
+  const rid = Number(item?.pause_reason_id);
+  if (!Number.isNaN(rid) && rid > 0) {
+    const fromMap = String(pauseReasonById?.[rid] || '').trim();
+    if (fromMap) return fromMap;
+    return `Razón #${rid}`;
+  }
+  return '';
+}
+
 function formatDateEs(dateStr) {
   if (!dateStr) return '—';
   try {
@@ -119,6 +145,7 @@ export default function ServicesListScreen({ navigation, route }) {
 
   const [projectStats, setProjectStats] = useState(null);
   const [loadingStats, setLoadingStats] = useState(false);
+  const [pauseReasonById, setPauseReasonById] = useState({});
 
   const filteredProjects = useMemo(() => {
     const q = String(projectSearch || '').trim().toLowerCase();
@@ -247,6 +274,34 @@ export default function ServicesListScreen({ navigation, route }) {
         }
       } catch {}
     })();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('pause_reasons')
+          .select('id, name')
+          .order('name', { ascending: true });
+        if (error) throw error;
+
+        const map = {};
+        (Array.isArray(data) ? data : []).forEach((r) => {
+          const id = Number(r?.id);
+          if (!Number.isNaN(id) && id > 0) {
+            map[id] = String(r?.name || '').trim();
+          }
+        });
+        if (!cancelled) setPauseReasonById(map);
+      } catch {
+        if (!cancelled) setPauseReasonById({});
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Web parity: refrescar lista con realtime
@@ -489,6 +544,29 @@ export default function ServicesListScreen({ navigation, route }) {
           ? (it.destination_address?.address ?? null)
           : (it.destination_address ?? it.destination ?? null);
 
+        const substatusIdRaw =
+          it?.substatus_id ??
+          it?.service_substatus_id ??
+          it?.substatus?.id ??
+          it?.sub_status_id;
+
+        const substatusNameRaw =
+          it?.substatus_name ??
+          it?.service_substatus_name ??
+          it?.substatus?.name ??
+          it?.sub_status_name;
+
+        const pauseReasonIdRaw =
+          it?.pause_reason_id ??
+          it?.service_pause_reason_id ??
+          it?.pause_reason?.id;
+
+        const pauseReasonNameRaw =
+          it?.pause_reason_name ??
+          it?.service_pause_reason_name ??
+          it?.pause_reason?.name ??
+          it?.pause_reason?.reason_name;
+
         return {
           service_id: it.service_id,
           project_name: it.project_name,
@@ -504,6 +582,10 @@ export default function ServicesListScreen({ navigation, route }) {
           destination: it.destination ?? destinationAddress,
           origin_address: originAddress,
           destination_address: destinationAddress,
+          substatus_id: substatusIdRaw != null ? Number(substatusIdRaw) : null,
+          substatus_name: substatusNameRaw != null ? String(substatusNameRaw) : '',
+          pause_reason_id: pauseReasonIdRaw != null ? Number(pauseReasonIdRaw) : null,
+          pause_reason_name: pauseReasonNameRaw != null ? String(pauseReasonNameRaw) : '',
         };
       });
 
@@ -610,8 +692,8 @@ export default function ServicesListScreen({ navigation, route }) {
         const statusName = String(item?.status_name || 'CREATED');
         const stVariant = statusVariant(statusName);
         const active = isServiceActive(statusName);
-        const sub = item?.substatus_name ? String(item.substatus_name) : '';
-        const pauseReason = item?.pause_reason_name ? String(item.pause_reason_name) : '';
+        const sub = getSubstatusNameFromItem(item);
+        const pauseReason = getPauseReasonLabel(item, pauseReasonById);
 
         return (
           <>
@@ -692,11 +774,17 @@ export default function ServicesListScreen({ navigation, route }) {
                 </View>
               )}
 
-              {!!sub && sub !== 'ACTIVED' && (
+              {sub === 'PAUSED' && (
                 <View style={styles.badgeDangerSoft}>
                   <Text style={styles.badgeDangerSoftText} numberOfLines={1}>
-                    {sub}{pauseReason ? ` · ${pauseReason}` : ''}
+                    PAUSED{pauseReason ? ` · ${pauseReason}` : ''}
                   </Text>
+                </View>
+              )}
+
+              {!!sub && sub !== 'ACTIVED' && sub !== 'PAUSED' && (
+                <View style={styles.badgeDangerSoft}>
+                  <Text style={styles.badgeDangerSoftText} numberOfLines={1}>{sub}</Text>
                 </View>
               )}
             </View>
@@ -704,7 +792,7 @@ export default function ServicesListScreen({ navigation, route }) {
         );
       })()}
     </TouchableOpacity>
-  ), [navigation, projectId, canUpdate, cancellingId]);
+  ), [navigation, projectId, canUpdate, cancellingId, pauseReasonById]);
 
   return (
     <View style={styles.screen}>
